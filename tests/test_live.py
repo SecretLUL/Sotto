@@ -282,6 +282,22 @@ class TestLiveTranscriber(unittest.TestCase):
 
 
 # ----------------------------------------------------------------------
+class TailBackend(FakeBackend):
+    """Puts its segment at the end of whatever file it is handed.
+
+    The closing pass prepends a few seconds of run-up before the point live
+    transcription reached, and drops whatever is recognised inside it. A
+    backend that always answers at second one would only ever land in that
+    discarded stretch.
+    """
+
+    def transcribe(self, wav_path, language="de", log=None, track="", progress=None):
+        duration = sf.info(wav_path).duration
+        self.calls.append(Call(wav_path, track, duration))
+        return [Segment(start=max(0.0, duration - 1.0), end=duration,
+                        text=f"{self.text} {len(self.calls)}", track=track)]
+
+
 class FakeLive:
     """Stands in for a LiveTranscriber that already did part of the work."""
 
@@ -308,13 +324,18 @@ class TestFinalizerWithLiveResults(unittest.TestCase):
         self.patcher = patch.object(pipeline, "TMP_DIR", self.tmp)
         self.patcher.start()
         self.bridge = FakeBridge()
-        self.backend = FakeBackend(text="tail")
+        self.backend = TailBackend(text="tail")
 
     def tearDown(self):
         self.patcher.stop()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def _recording(self, seconds=10.0, offset=0.0):
+    # Longer than one whisper window, so the tail rule can actually bind: the
+    # closing pass never gets less than LIVE_TAIL_WINDOW_S of audio.
+    SECONDS = 60.0
+    COVERED = 50.0
+
+    def _recording(self, seconds=SECONDS, offset=0.0):
         from audio_transcriber.audio.capture import RecordingResult, TrackResult
         path = os.path.join(self.tmp, "meeting.mic.raw.wav")
         sf.write(path, speech(seconds, rate=dsp.TARGET_RATE), dsp.TARGET_RATE)
@@ -333,10 +354,12 @@ class TestFinalizerWithLiveResults(unittest.TestCase):
         self.assertEqual(failed, [], f"unexpected failure: {failed}")
         return self.bridge.of_type(Finished)[0]
 
+    def _live(self, segments=()):
+        return FakeLive({"mic": self.COVERED}, {"mic": list(segments)})
+
     def test_live_lines_end_up_in_the_saved_transcript(self):
-        live = FakeLive({"mic": 8.0},
-                        {"mic": [Segment(start=1.0, end=2.0, text="said live",
-                                         track="mic")]})
+        live = self._live([Segment(start=1.0, end=2.0, text="said live",
+                                   track="mic")])
         finished = self._run(live)
         self.assertTrue(live.finished)
         self.assertIn("said live", finished.text)
@@ -344,23 +367,54 @@ class TestFinalizerWithLiveResults(unittest.TestCase):
             self.assertIn("said live", handle.read())
 
     def test_only_the_tail_is_sent_to_the_recogniser(self):
-        live = FakeLive({"mic": 8.0},
-                        {"mic": [Segment(start=1.0, end=2.0, text="said live",
-                                         track="mic")]})
-        self._run(live)
+        self._run(self._live([Segment(start=1.0, end=2.0, text="said live",
+                                      track="mic")]))
         self.assertEqual(len(self.backend.calls), 1)
-        self.assertAlmostEqual(self.backend.calls[0].duration, 2.0,
-                               delta=0.2)                       # 10 s - 8 s
+        # 10 s of tail, stretched to a full whisper window - anything shorter
+        # is segmented differently from the same audio in a longer file.
+        self.assertAlmostEqual(self.backend.calls[0].duration,
+                               pipeline.LIVE_TAIL_WINDOW_S, delta=0.2)
 
     def test_tail_segments_are_moved_onto_the_full_timeline(self):
-        live = FakeLive({"mic": 8.0}, {"mic": []})
-        finished = self._run(live)
-        # The backend reports 1.0 s inside the tail, which starts at 8.0 s.
-        self.assertIn("[00:09]", finished.text)
+        finished = self._run(self._live())
+        # The tail file starts at 30 s and the backend answers at its end.
+        self.assertIn("[00:59]", finished.text)
+
+    def test_what_the_run_up_recognises_is_thrown_away(self):
+        """Those seconds are already in the live segments - once is enough."""
+        self.backend = FakeBackend(text="run-up")     # answers at second 1
+        finished = self._run(self._live([Segment(start=1.0, end=2.0,
+                                                 text="said live", track="mic")]))
+
+        self.assertEqual(len(self.backend.calls), 1)  # the run-up did run
+        self.assertNotIn("run-up", finished.text)     # but is not kept
+        self.assertIn("said live", finished.text)
+
+    def test_a_segment_across_the_cut_is_kept(self):
+        """Regression: it took the end of the recording with it.
+
+        whisper merges the closing sentences into one segment that begins just
+        before the cut. Judged by its start it counted as run-up and was
+        dropped - together with everything it said after the cut, which nothing
+        else had transcribed.
+        """
+        class StraddlingBackend(FakeBackend):
+            def transcribe(self, wav_path, language="de", log=None, track="",
+                           progress=None):
+                duration = sf.info(wav_path).duration
+                self.calls.append(Call(wav_path, track, duration))
+                # Begins one second before the cut, runs to the end.
+                return [Segment(start=duration - 11.0, end=duration,
+                                text="goodbye then", track=track)]
+
+        self.backend = StraddlingBackend()
+        finished = self._run(self._live())
+        self.assertIn("goodbye then", finished.text)
 
     def test_without_live_results_the_whole_track_runs(self):
         finished = self._run(None)
-        self.assertAlmostEqual(self.backend.calls[0].duration, 10.0, delta=0.2)
+        self.assertAlmostEqual(self.backend.calls[0].duration, self.SECONDS,
+                               delta=0.2)
         self.assertIn("tail 1", finished.text)
 
     def test_the_start_offset_shifts_live_and_tail_alike(self):
@@ -376,8 +430,9 @@ class TestFinalizerWithLiveResults(unittest.TestCase):
 
         finished = self.bridge.of_type(Finished)[0]
         self.assertIn("[00:03]", finished.text)      # live 1.0 s + 2.0 s offset
-        # The tail starts at 4.0 + 2.0 s, so its 1.0 s segment lands at 7 s.
-        self.assertIn("[00:07]", finished.text)
+        # The tail is cut at 4.0 + 2.0 s and ends with the padded track at
+        # 62.0 s - one second before that is where the backend answers.
+        self.assertIn("[01:01]", finished.text)
 
 
 if __name__ == "__main__":

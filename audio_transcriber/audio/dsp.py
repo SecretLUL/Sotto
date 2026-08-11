@@ -190,18 +190,24 @@ def limit_peak(x, ceiling=0.95):
     return x
 
 
-def normalize_for_asr(x, target_rms=0.06, ceiling=0.95):
+def normalize_for_asr(x, target_rms=0.06, ceiling=0.95, reference=None):
     """Bring a track to an even level for speech recognition.
 
     whisper performs noticeably worse on very quiet material. Because both
     tracks are transcribed separately, each may be normalised independently -
     unlike in the previous version this no longer affects speaker attribution,
     which works on levels relative to each track.
+
+    `reference` overrides the level this piece is measured against. Pass the
+    whole track's reference when normalising a section of it: a short quiet
+    excerpt measured on its own gets the full +32 dB, which lifts room noise
+    to speech level - and whisper answers amplified noise with hallucinations.
     """
     x = np.asarray(x, dtype=np.float32)
     if x.size == 0:
         return x
-    reference = reference_level(x)
+    if reference is None:
+        reference = reference_level(x)
     if reference <= SILENCE_FLOOR:
         return x
     factor = min(target_rms / reference, 40.0)   # at most +32 dB, else noise

@@ -151,6 +151,29 @@ class TestGain(unittest.TestCase):
         silence = np.zeros(16000, dtype=np.float32)
         np.testing.assert_array_equal(dsp.normalize_for_asr(silence), silence)
 
+    def test_a_given_reference_replaces_the_measured_one(self):
+        """An excerpt normalised on its own gets a gain of its own.
+
+        Live transcription hands the closing pass a tail of a few seconds.
+        Measured alone, a quiet tail is lifted to full speech level - whisper
+        answers amplified room noise with invented sentences. Passing the whole
+        track's reference gives the excerpt exactly the track's gain.
+        """
+        rng = np.random.default_rng(3)
+        loud = rng.normal(0, 0.2, 16000 * 3).astype(np.float32)
+        quiet_tail = rng.normal(0, 0.004, 16000).astype(np.float32)
+
+        alone = dsp.normalize_for_asr(quiet_tail)
+        with_track = dsp.normalize_for_asr(
+            quiet_tail, reference=dsp.reference_level(loud))
+
+        self.assertGreater(dsp.reference_level(alone),
+                           10 * dsp.reference_level(with_track))
+        # Exactly the gain the given reference asks for - no measuring of its
+        # own, so the excerpt keeps its place in the track's dynamics.
+        factor = 0.06 / dsp.reference_level(loud)
+        np.testing.assert_allclose(with_track, quiet_tail * factor, rtol=1e-5)
+
 
 if __name__ == "__main__":
     unittest.main()

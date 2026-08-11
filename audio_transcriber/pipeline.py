@@ -38,6 +38,19 @@ LIVE_CHUNK_S = 30.0
 # The chunk boundary is moved into the quietest spot of these last seconds.
 LIVE_SPLIT_SEARCH_S = 3.0
 
+# Run-up the closing pass gets before the point live transcription reached.
+# Its segments are dropped again; it only exists so whisper does not start
+# cold on a short piece of audio.
+LIVE_TAIL_CONTEXT_S = 5.0
+
+# ... and never less than a full whisper window. whisper decodes in 30 s
+# windows, so a shorter excerpt is segmented differently from the same audio
+# inside a longer file. Measured on a 62 s recording with a 5 s tail: the
+# closing "Yeah, tschüssi!" came back as one eight-second segment with the
+# wrong text, which the energy filter then dropped as signal-free. With a full
+# window it is recognised exactly as a single pass recognises it.
+LIVE_TAIL_WINDOW_S = 30.0
+
 # Give up once this much audio has piled up untranscribed: the chosen model is
 # slower than real time and the buffer would grow without bound. Nothing is
 # lost - the closing pass has the raw tracks on disk and continues at
@@ -157,15 +170,28 @@ class Finalizer:
         live_segments, tail_start = self._live_results(recording, length)
 
         asr_paths = {}
+        tail_audio_start = {}
         for kind, audio in (("mic", mic), ("sys", system)):
             # Everything before tail_start has already been recognised while
-            # recording; transcribing it again would only duplicate lines.
-            tail = audio[min(len(audio), int(tail_start[kind] * dsp.TARGET_RATE)):]
+            # recording; transcribing it again would only duplicate lines. The
+            # run-up before the cut is transcribed anyway and thrown away
+            # afterwards - whisper started cold on a few seconds of audio
+            # hallucinates instead of recognising.
+            begin = 0.0
+            if tail_start[kind]:
+                begin = max(0.0, min(tail_start[kind] - LIVE_TAIL_CONTEXT_S,
+                                     len(audio) / float(dsp.TARGET_RATE)
+                                     - LIVE_TAIL_WINDOW_S))
+            tail_audio_start[kind] = begin
+            tail = audio[min(len(audio), int(begin * dsp.TARGET_RATE)):]
             if len(tail) == 0 or dsp.reference_level(tail) <= dsp.SILENCE_FLOOR:
                 continue
             path = os.path.join(TMP_DIR, f"{base_name}.{kind}.asr.wav")
-            sf.write(path, dsp.normalize_for_asr(tail), dsp.TARGET_RATE,
-                     subtype="PCM_16")
+            # Measured against the whole track, not against the excerpt: a
+            # quiet tail normalised on its own comes back as amplified noise.
+            sf.write(path, dsp.normalize_for_asr(
+                tail, reference=dsp.reference_level(audio)),
+                dsp.TARGET_RATE, subtype="PCM_16")
             asr_paths[kind] = path
 
         if not asr_paths and not any(live_segments.values()):
@@ -185,8 +211,17 @@ class Finalizer:
                 label = "your track" if kind == "mic" else "the system track"
                 bridge.post(Status(f"Transcribing {label}…", "purple"))
                 bridge.post(Log(f"\n--- Transcription: {label} ---\n"))
+                found = _shift_all(self._transcribe(path, kind),
+                                   tail_audio_start[kind])
+                # Drop the run-up again: those seconds are already in the live
+                # segments, and keeping both would print them twice. Decided on
+                # the middle of a segment, not its start - on the short tail
+                # whisper likes to merge the last sentences into one segment
+                # that begins just before the cut, and dropping that on its
+                # start swallowed the end of the recording.
                 segments[kind].extend(
-                    _shift_all(self._transcribe(path, kind), tail_start[kind]))
+                    segment for segment in found
+                    if (segment.start + segment.end) / 2.0 >= tail_start[kind])
         else:
             # Single pass over the mixdown (faster, but the attribution has to
             # be estimated again).
@@ -308,6 +343,7 @@ class LiveTranscriber:
         self.covered_s = {"mic": 0.0, "sys": 0.0}
 
         self._base_name = "live"
+        self._reference = {"mic": 0.0, "sys": 0.0}   # worker thread only
         self._pending = {"mic": [], "sys": []}
         self._pending_frames = {"mic": 0, "sys": 0}
         self._rates = {}
@@ -472,18 +508,26 @@ class LiveTranscriber:
         duration = len(audio) / float(rate)
         mono = dsp.resample(audio, rate, dsp.TARGET_RATE)
 
-        if dsp.reference_level(mono) <= dsp.SILENCE_FLOOR:
+        reference = dsp.reference_level(mono)
+        if reference <= dsp.SILENCE_FLOOR:
             # Nothing on this track - the normal case for the microphone while
             # the other side is talking. Skip the recogniser entirely.
             self._advance(kind, duration, [])
             return
 
+        # Never amplify a quiet chunk more than the loudest one so far. Judged
+        # on its own, a chunk of pure room noise gets the full +32 dB and comes
+        # back from whisper as invented speech - and unlike the preview, these
+        # segments end up in the saved transcript.
+        self._reference[kind] = max(self._reference[kind], reference)
+
         path = os.path.join(
             TMP_DIR, f"{self._base_name}.{kind}.live{self._chunk_index}.wav")
         self._chunk_index += 1
         os.makedirs(TMP_DIR, exist_ok=True)
-        sf.write(path, dsp.normalize_for_asr(mono), dsp.TARGET_RATE,
-                 subtype="PCM_16")
+        sf.write(path, dsp.normalize_for_asr(mono,
+                                             reference=self._reference[kind]),
+                 dsp.TARGET_RATE, subtype="PCM_16")
         try:
             found = self._backend.transcribe(
                 path, language=self.settings.language, track=kind)
