@@ -128,7 +128,38 @@ class AudioEngine:
         # streams, so two rapid device changes could interleave as
         # A.stop / B.stop / A.assign / B.assign and leak A's streams.
         self._configure_lock = threading.Lock()
+        self._tap = None
         self.last_error = None
+
+    # ------------------------------------------------------------------
+    def set_tap(self, callback):
+        """Watch every mono block on its way into the raw track file.
+
+        callback(kind, samples, rate, position) runs on the capture thread and
+        must return immediately - the live transcriber only appends to a
+        buffer. Pass None to detach.
+
+        The tap sees exactly what the file receives, including the silence the
+        drift correction inserts, so a sample position means the same point in
+        time on both sides. That is what lets the live segments and the closing
+        pass share one timeline. `position` is where the block sits in the
+        file, which lets a consumer notice that it attached too late to have
+        heard the beginning.
+        """
+        self._tap = callback
+
+    def _emit(self, track, samples):
+        """Called right after the samples went into the file, so
+        track.frames - len(samples) is exactly where they landed."""
+        tap = self._tap
+        if tap is None:
+            return
+        try:
+            tap(track.kind, samples, track.rate, track.frames - len(samples))
+        except Exception:
+            # A broken consumer must never take the capture thread with it.
+            # Detach instead of failing on every following block.
+            self._tap = None
 
     @property
     def is_configuring(self):
@@ -388,19 +419,23 @@ class AudioEngine:
                         origin = now
                         writer.write(mono)
                         track.frames += len(mono)
+                        self._emit(track, mono)
                         continue
 
                     # --- drift correction against the wall clock (H3) -------
                     deficit = drift_deficit(now - origin, rate, track.frames, len(mono))
                     if deficit > 0:
-                        writer.write(np.zeros(deficit, dtype=np.float32))
+                        silence = np.zeros(deficit, dtype=np.float32)
+                        writer.write(silence)
                         track.frames += deficit
                         track.inserted += deficit
+                        self._emit(track, silence)
                     elif deficit < 0:
                         track.surplus = max(track.surplus, -deficit)
 
                     writer.write(mono)
                     track.frames += len(mono)
+                    self._emit(track, mono)
         except Exception as exc:                # pragma: no cover
             track.error = f"Capture thread '{track.device.name}': {exc}"
         finally:

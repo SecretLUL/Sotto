@@ -115,6 +115,29 @@ def frame_rms(x, frame_len):
     return np.sqrt(np.mean(np.square(frames, dtype=np.float64), axis=1)).astype(np.float32)
 
 
+def quietest_split(x, rate, earliest, latest, frame_s=0.05):
+    """Sample index in [earliest, latest] with the least energy.
+
+    Live transcription has to cut the running recording into chunks somewhere.
+    Cutting through a word costs that word in both chunks, cutting into a pause
+    costs nothing - so the boundary is moved to the quietest 50 ms of the
+    search range instead of landing on a fixed sample number.
+
+    Falls back to `latest` when the range is too short to search.
+    """
+    x = np.asarray(x, dtype=np.float32)
+    earliest = max(0, int(earliest))
+    latest = min(len(x), int(latest))
+    frame = max(1, int(rate * frame_s))
+    if latest - earliest < 2 * frame:
+        return latest
+
+    levels = frame_rms(x[earliest:latest], frame)
+    if levels.size == 0:
+        return latest
+    return earliest + int(np.argmin(levels)) * frame + frame // 2
+
+
 def reference_level(x, rate=TARGET_RATE, percentile=95.0):
     """Typical speech level of a track: percentile of the 100 ms frame RMS.
 
