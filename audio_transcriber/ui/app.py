@@ -27,7 +27,7 @@ from ..audio import devices as devmod
 from ..audio.capture import AudioEngine
 from ..events import (Failed, Finished, LivePreview, Log, Progress, Status,
                       UiBridge)
-from . import icons
+from . import dialogs, icons
 from . import theme as T
 from . import widgets as W
 
@@ -530,9 +530,13 @@ class RecorderApp:
 
     def _begin_recording(self):
         self._sync_settings_from_ui()
-        base_name = paths.safe_output_name(self.filename_entry.get())
-        self.filename_entry.delete(0, tk.END)
-        self.filename_entry.insert(0, base_name)
+        base_name = self._resolve_output_conflict(
+            paths.safe_output_name(self.filename_entry.get()))
+        if base_name is None:                       # the user cancelled
+            self.start_btn.config(state="normal")
+            self.status.set("ready", T.TEXT_MUTE)
+            return
+        self._apply_base_name(base_name)
 
         try:
             self.engine.start_recording(base_name)
@@ -598,7 +602,11 @@ class RecorderApp:
 
         self._sync_settings_from_ui()
         file_basename = os.path.splitext(os.path.basename(file_path))[0]
-        base_name = paths.safe_output_name(self.filename_entry.get() or file_basename)
+        base_name = self._resolve_output_conflict(
+            paths.safe_output_name(self.filename_entry.get() or file_basename))
+        if base_name is None:                       # the user cancelled
+            return
+        self._apply_base_name(base_name)
 
         self.start_btn.config(state="disabled")
         self.upload_btn.config(state="disabled")
@@ -611,6 +619,26 @@ class RecorderApp:
 
         self.finalizer = pipeline.FileFinalizer(self.bridge, self.settings)
         self.finalizer.run_async(file_path, base_name)
+
+    # ------------------------------------------------------------------
+    def _resolve_output_conflict(self, base_name):
+        """Ask before an existing recording is silently replaced.
+
+        Both output files are written as '<base_name>.wav' / '.txt', so a
+        second run under the same name used to overwrite the first one without
+        a word. Returns the base name to write to - possibly numbered or
+        renamed - or None when the user cancelled.
+        """
+        out_dir = self.settings.get_output_dir()
+        if not paths.existing_outputs(out_dir, base_name):
+            return base_name
+        return dialogs.ask_output_conflict(self.root, out_dir, base_name)
+
+    def _apply_base_name(self, base_name):
+        """Show the name that is actually going to be written on disk."""
+        self.filename_entry.delete(0, tk.END)
+        self.filename_entry.insert(0, base_name)
+        self.settings.filename = base_name
 
     def _reset_controls(self):
         self.start_btn.config(state="normal")
