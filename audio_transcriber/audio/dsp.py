@@ -13,6 +13,11 @@ import scipy.signal as sps
 TARGET_RATE = 16000          # whisper.cpp and ElevenLabs both expect 16 kHz
 SILENCE_FLOOR = 1e-6         # below this: treat as digital silence
 
+# Telling speech from the noise floor in reference_level()
+NOISE_FLOOR_PERCENTILE = 10.0
+SPEECH_ABOVE_FLOOR = 10.0 ** (10.0 / 20.0)    # a frame must be 10 dB over the floor
+MIN_SPEECH_FRAMES = 10                        # ... and there must be a second of them
+
 
 # ----------------------------------------------------------------------
 # Downmix
@@ -149,14 +154,31 @@ def reference_level(x, rate=TARGET_RATE, percentile=95.0):
 
     The 95th percentile rather than the maximum, so a single cough or mouse
     click cannot move the reference point.
+
+    That percentile breaks down on a track on which little is said - a webinar
+    you only listen to, a call in which the other side does the talking. Below
+    roughly 5 % speech it lands in the room noise, and the noise then counts as
+    "typical speech": normalize_for_asr() lifts it by the full +32 dB to speech
+    level and the silence filter in diarize.py can no longer tell it from a
+    spoken line, so whisper's hallucinations over the noise survive. The
+    reference is therefore never below the median of the frames that stand
+    clearly out of the noise floor (10 dB above its 10th percentile, at least
+    a second of them). With enough speech that median is lower than the
+    percentile and nothing changes; with little speech it replaces it.
     """
     levels = frame_rms(x, max(1, int(rate * 0.1)))
     if levels.size == 0:
         return rms(x)
-    speech = levels[levels > SILENCE_FLOOR]
-    if speech.size == 0:
+    levels = levels[levels > SILENCE_FLOOR]
+    if levels.size == 0:
         return 0.0
-    return float(np.percentile(speech, percentile))
+    reference = float(np.percentile(levels, percentile))
+
+    floor = float(np.percentile(levels, NOISE_FLOOR_PERCENTILE))
+    speech = levels[levels > floor * SPEECH_ABOVE_FLOOR]
+    if speech.size >= MIN_SPEECH_FRAMES:
+        reference = max(reference, float(np.median(speech)))
+    return reference
 
 
 def segment_rms(x, t_start, t_end, rate=TARGET_RATE):

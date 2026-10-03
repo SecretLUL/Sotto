@@ -65,6 +65,36 @@ class TestGainInvariance(unittest.TestCase):
                 self.assertEqual(self._labels(mic_factor, sys_factor), expected)
 
 
+class TestSparseTrack(unittest.TestCase):
+    """You listen, the other side talks: the microphone carries room noise and a
+    couple of spoken lines. Whisper makes up sentences over such noise; whether
+    the filter drops them used to depend on how much was said on that track."""
+
+    def test_made_up_lines_over_the_noise_go_and_spoken_ones_stay(self):
+        seconds = 600
+        rng = np.random.default_rng(7)
+        mic = rng.normal(0, 10 ** (-58 / 20), seconds * RATE).astype(np.float32)
+        for start, end in ((150.0, 156.0), (450.0, 456.0)):    # 2 % speech
+            i_start, i_end = int(start * RATE), int(end * RATE)
+            mic[i_start:i_end] += rng.normal(0, 10 ** (-22 / 20),
+                                             i_end - i_start).astype(np.float32)
+        system = track([(50.0, 90.0, 0.2)], seconds=seconds, seed=2)
+
+        mic_segments = [
+            Segment(150.2, 155.8, "Yes, I agree with that.", "mic"),
+            Segment(300.0, 303.0, "Thank you for watching.", "mic"),   # made up
+            Segment(450.2, 455.8, "One more question.", "mic"),
+        ]
+        sys_segments = [Segment(50.5, 89.0, "The other side talking.", "sys")]
+
+        report = diarize.merge(mic_segments, sys_segments,
+                               mic_audio=mic, sys_audio=system)
+
+        mine = [line.text for line in report.lines if line.track == "mic"]
+        self.assertEqual(mine, ["Yes, I agree with that.", "One more question."])
+        self.assertEqual(report.dropped_silence, 1)
+
+
 class TestBleedSuppression(unittest.TestCase):
     def test_speaker_bleed_into_microphone_is_dropped(self):
         """Speaker playback: the other party's voice reaches the microphone
