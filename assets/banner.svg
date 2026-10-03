@@ -1,0 +1,111 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 400" width="1280" height="400" role="img" aria-labelledby="title desc">
+  <title id="title">Sotto</title>
+  <desc id="desc">Private meeting transcripts, made on your machine.</desc>
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#151925"/>
+      <stop offset="1" stop-color="#0a0c0e"/>
+    </linearGradient>
+    <radialGradient id="glow-you" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#38bdf8" stop-opacity="0.14"/>
+      <stop offset="1" stop-color="#38bdf8" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glow-them" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#34d399" stop-opacity="0.10"/>
+      <stop offset="1" stop-color="#34d399" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="dots" width="24" height="24" patternUnits="userSpaceOnUse">
+      <circle cx="12" cy="12" r="1.1" fill="#ffffff" fill-opacity="0.05"/>
+    </pattern>
+    <linearGradient id="fade" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#fff" stop-opacity="0"/>
+      <stop offset="0.25" stop-color="#fff" stop-opacity="1"/>
+      <stop offset="0.75" stop-color="#fff" stop-opacity="1"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+    <mask id="fade-mask"><rect width="1280" height="400" fill="url(#fade)"/></mask>
+    <clipPath id="frame"><rect width="1280" height="400" rx="24"/></clipPath>
+  </defs>
+
+  <g clip-path="url(#frame)">
+    <rect width="1280" height="400" fill="url(#sky)"/>
+    <rect width="1280" height="400" fill="url(#dots)"/>
+    <circle cx="150" cy="150" r="300" fill="url(#glow-you)"/>
+    <circle cx="1000" cy="230" r="320" fill="url(#glow-them)"/>
+
+    <!-- Two tracks along the bottom: your voice above the line, the others below. -->
+    <g mask="url(#fade-mask)" opacity="0.55">
+    <path d="M 0 376.1 C 3.3 375.5 13.3 374.2 20 372.6 26.7 371.1 33.3 368.9 40 366.7 46.7 364.6 53.3 361.9 60 359.6 66.7 357.3 73.3 354.8 80 352.8 86.7 350.9 93.3 349.1 100 347.9 106.7 346.8 113.3 346.1 120 346 126.7 346 133.3 346.5 140 347.5 146.7 348.6 153.3 350.3 160 352.2 166.7 354.1 173.3 356.6 180 358.9 186.7 361.2 193.3 363.9 200 366.2 206.7 368.4 213.3 370.7 220 372.4 226.7 374.1 233.3 375.5 240 376.3 246.7 377.1 253.3 377.3 260 377 266.7 376.7 273.3 375.8 280 374.5 286.7 373.3 293.3 371.4 300 369.5 306.7 367.6 313.3 365.3 320 363.2 326.7 361.1 333.3 358.8 340 356.9 346.7 355.1 353.3 353.4 360 352.2 366.7 351 373.3 350.2 380 349.8 386.7 349.5 393.3 349.7 400 350.2 406.7 350.7 413.3 351.8 420 353 426.7 354.2 433.3 355.8 440 357.4 446.7 358.9 453.3 360.8 460 362.3 466.7 363.9 473.3 365.5 480 366.7 486.7 367.9 493.3 368.9 500 369.5 506.7 370.2 513.3 370.5 520 370.5 526.7 370.5 533.3 370.1 540 369.6 546.7 369 553.3 368.1 560 367.2 566.7 366.3 573.3 365.2 580 364.1 586.7 363.1 593.3 362 600 361.1 606.7 360.2 613.3 359.3 620 358.7 626.7 358.1 633.3 357.7 640 357.5 646.7 357.2 653.3 357.2 660 357.3 666.7 357.5 673.3 357.8 680 358.2 686.7 358.6 693.3 359.2 700 359.7 706.7 360.2 713.3 360.8 720 361.3 726.7 361.8 733.3 362.4 740 362.8 746.7 363.2 753.3 363.5 760 363.7 766.7 364 773.3 364.1 780 364.2 786.7 364.2 793.3 364.2 800 364.1 806.7 364 813.3 363.8 820 363.6 826.7 363.4 833.3 363.2 840 362.9 846.7 362.7 853.3 362.4 860 362.2 866.7 361.9 873.3 361.6 880 361.4 886.7 361.2 893.3 361 900 360.8 906.7 360.6 913.3 360.5 920 360.4 926.7 360.3 933.3 360.3 940 360.3 946.7 360.3 953.3 360.4 960 360.5 966.7 360.6 973.3 360.8 980 361.1 986.7 361.4 993.3 361.7 1000 362.1 1006.7 362.4 1013.3 362.8 1020 363.2 1026.7 363.6 1033.3 364.1 1040 364.4 1046.7 364.8 1053.3 365.1 1060 365.3 1066.7 365.5 1073.3 365.6 1080 365.6 1086.7 365.5 1093.3 365.3 1100 365 1106.7 364.6 1113.3 364.1 1120 363.5 1126.7 362.9 1133.3 362.1 1140 361.3 1146.7 360.5 1153.3 359.6 1160 358.8 1166.7 358 1173.3 357.1 1180 356.5 1186.7 355.9 1193.3 355.4 1200 355.2 1206.7 355 1213.3 354.9 1220 355.2 1226.7 355.5 1233.3 356.1 1240 357 1246.7 357.8 1253.3 359 1260 360.2 1266.7 361.4 1276.7 363.6 1280 364.3" stroke="#38bdf8" stroke-width="2.5" fill="none"/>
+    <path d="M 0 354.4 C 3.3 353.9 13.3 352.2 20 351.5 26.7 350.8 33.3 350.4 40 350.3 46.7 350.2 53.3 350.4 60 350.9 66.7 351.3 73.3 352.1 80 353 86.7 354 93.3 355.2 100 356.4 106.7 357.6 113.3 359 120 360.2 126.7 361.5 133.3 362.8 140 364 146.7 365.1 153.3 366.2 160 367 166.7 367.9 173.3 368.5 180 369 186.7 369.4 193.3 369.6 200 369.6 206.7 369.6 213.3 369.4 220 369.1 226.7 368.7 233.3 368.2 240 367.6 246.7 367 253.3 366.2 260 365.5 266.7 364.8 273.3 364 280 363.3 286.7 362.6 293.3 361.9 300 361.3 306.7 360.7 313.3 360.2 320 359.8 326.7 359.4 333.3 359.2 340 359 346.7 358.8 353.3 358.8 360 358.8 366.7 358.8 373.3 359 380 359.1 386.7 359.3 393.3 359.6 400 359.8 406.7 360.1 413.3 360.4 420 360.6 426.7 360.9 433.3 361.2 440 361.4 446.7 361.7 453.3 361.9 460 362.1 466.7 362.3 473.3 362.5 480 362.7 486.7 362.8 493.3 362.9 500 363 506.7 363.1 513.3 363.2 520 363.2 526.7 363.3 533.3 363.3 540 363.3 546.7 363.3 553.3 363.3 560 363.3 566.7 363.2 573.3 363.1 580 363 586.7 362.9 593.3 362.8 600 362.6 606.7 362.4 613.3 362.2 620 362 626.7 361.7 633.3 361.4 640 361.1 646.7 360.8 653.3 360.5 660 360.1 666.7 359.8 673.3 359.5 680 359.2 686.7 358.9 693.3 358.7 700 358.5 706.7 358.4 713.3 358.2 720 358.3 726.7 358.3 733.3 358.4 740 358.7 746.7 359 753.3 359.4 760 359.9 766.7 360.4 773.3 361 780 361.7 786.7 362.4 793.3 363.2 800 364 806.7 364.8 813.3 365.7 820 366.5 826.7 367.3 833.3 368 840 368.6 846.7 369.2 853.3 369.7 860 370 866.7 370.3 873.3 370.4 880 370.2 886.7 370.1 893.3 369.7 900 369.1 906.7 368.5 913.3 367.6 920 366.7 926.7 365.7 933.3 364.4 940 363.2 946.7 361.9 953.3 360.5 960 359.1 966.7 357.8 973.3 356.4 980 355.2 986.7 354 993.3 352.8 1000 352 1006.7 351.1 1013.3 350.5 1020 350.1 1026.7 349.8 1033.3 349.8 1040 350 1046.7 350.3 1053.3 350.9 1060 351.8 1066.7 352.7 1073.3 353.9 1080 355.2 1086.7 356.5 1093.3 358.1 1100 359.7 1106.7 361.3 1113.3 363.1 1120 364.7 1126.7 366.2 1133.3 367.9 1140 369.2 1146.7 370.6 1153.3 371.8 1160 372.7 1166.7 373.6 1173.3 374.3 1180 374.6 1186.7 374.9 1193.3 374.8 1200 374.5 1206.7 374.2 1213.3 373.5 1220 372.6 1226.7 371.7 1233.3 370.4 1240 369.2 1246.7 367.9 1253.3 366.3 1260 364.9 1266.7 363.4 1276.7 361.1 1280 360.4" stroke="#34d399" stroke-width="2.5" fill="none"/>
+    </g>
+  </g>
+  <rect x="0.75" y="0.75" width="1278.5" height="398.5" rx="23.25" fill="none" stroke="#2a2f3d" stroke-width="1.5"/>
+
+  <!-- Mark and name -->
+  <g transform="translate(84 86) scale(0.26)">
+    <defs>
+      <linearGradient id="badge" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#232838"/>
+        <stop offset="1" stop-color="#0a0c0e"/>
+      </linearGradient>
+      <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+        <stop offset="0" stop-color="#38bdf8" stop-opacity="0.16"/>
+        <stop offset="1" stop-color="#38bdf8" stop-opacity="0"/>
+      </radialGradient>
+      <!-- your voice -->
+      <linearGradient id="you" gradientUnits="userSpaceOnUse" x1="0" y1="108" x2="0" y2="256">
+        <stop offset="0" stop-color="#7dd3fc"/>
+        <stop offset="1" stop-color="#38bdf8"/>
+      </linearGradient>
+      <!-- everyone else -->
+      <linearGradient id="them" gradientUnits="userSpaceOnUse" x1="0" y1="256" x2="0" y2="404">
+        <stop offset="0" stop-color="#34d399"/>
+        <stop offset="1" stop-color="#10b981"/>
+      </linearGradient>
+    </defs>
+    <rect x="24" y="24" width="464" height="464" rx="116" fill="url(#badge)"/>
+    <rect x="25.5" y="25.5" width="461" height="461" rx="114.5" fill="none" stroke="#2e3445" stroke-width="3"/>
+    <circle cx="256" cy="256" r="210" fill="url(#glow)"/>
+    <g fill="none">
+      <path d="M 330.17 147.26 A 84 74 0 1 0 257.47 255.99" stroke="url(#you)" stroke-width="46" stroke-linecap="round"/>
+      <path d="M 256 256 A 84 74 0 1 1 181.83 364.74" stroke="url(#them)" stroke-width="46"/>
+      <circle cx="181.83" cy="364.74" r="23" fill="url(#them)" stroke="none"/>
+    </g>
+  </g>
+    <g transform="translate(250 103) scale(0.98)" fill="none">
+      <path d="M 56.46 18.77 A 26 21.25 0 1 0 33.95 50" stroke="#f1f5f9" stroke-width="15" stroke-linecap="round"/>
+      <path d="M 33.5 50 A 26 21.25 0 1 1 10.54 81.23" stroke="#f1f5f9" stroke-width="15"/>
+      <circle cx="10.54" cy="81.23" r="7.5" fill="#f1f5f9" stroke="none"/>
+      <ellipse cx="114.5" cy="65" rx="27" ry="27.5" stroke="#f1f5f9" stroke-width="15"/>
+      <path d="M 177.5 17.5 V 78.5 A 14 14 0 0 0 191.5 92.5 H 194.5" stroke="#f1f5f9" stroke-width="15" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M 219.5 17.5 V 78.5 A 14 14 0 0 0 233.5 92.5 H 236.5" stroke="#f1f5f9" stroke-width="15" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M 164.5 37.5 H 240.5" stroke="#f1f5f9" stroke-width="15" stroke-linecap="round"/>
+      <ellipse cx="291.5" cy="65" rx="27" ry="27.5" stroke="#f1f5f9" stroke-width="15"/>
+    </g>
+
+  <g font-family="'Segoe UI', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif" font-size="26">
+    <text x="88" y="262" textLength="636" lengthAdjust="spacingAndGlyphs" fill="#94a3b8">Private meeting transcripts, made on your machine.</text>
+  </g>
+  <g font-family="'Segoe UI', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif" font-size="15">
+    <rect x="88" y="292" width="159.2" height="34" rx="17" fill="#1b1e26" stroke="#2a2f3d"/>
+    <text x="103" y="314" textLength="129.2" lengthAdjust="spacingAndGlyphs" fill="#94a3b8">Local whisper.cpp</text>
+    <rect x="257.2" y="292" width="136.4" height="34" rx="17" fill="#1b1e26" stroke="#2a2f3d"/>
+    <text x="272.2" y="314" textLength="106.4" lengthAdjust="spacingAndGlyphs" fill="#94a3b8">Exact speakers</text>
+    <rect x="403.6" y="292" width="204.8" height="34" rx="17" fill="#1b1e26" stroke="#2a2f3d"/>
+    <text x="418.6" y="314" textLength="174.8" lengthAdjust="spacingAndGlyphs" fill="#94a3b8">Windows · Linux · macOS</text>
+  </g>
+
+  <!-- What it produces: who said what -->
+  <rect x="790" y="70" width="410" height="240" rx="16" fill="#1b1e26" stroke="#2a2f3d" stroke-width="1.5"/>
+  <circle cx="816" cy="98" r="5.5" fill="#f43f5e"/>
+  <circle cx="834" cy="98" r="5.5" fill="#f59e0b"/>
+  <circle cx="852" cy="98" r="5.5" fill="#10b981"/>
+  <text x="1176" y="103" text-anchor="end" font-family="ui-monospace, 'Cascadia Mono', Consolas, Menlo, 'DejaVu Sans Mono', monospace" font-size="13" fill="#64748b">meeting.txt</text>
+  <path d="M 790 124 H 1200" stroke="#2a2f3d" stroke-width="1.5"/>
+  <g font-family="ui-monospace, 'Cascadia Mono', Consolas, Menlo, 'DejaVu Sans Mono', monospace" font-size="14">
+    <text x="814" y="166" textLength="252" lengthAdjust="spacingAndGlyphs"><tspan fill="#64748b">[00:04] </tspan><tspan fill="#38bdf8">[You]:</tspan><tspan fill="#e2e8f0"> Shall we start?</tspan></text>
+    <text x="814" y="202" textLength="319.2" lengthAdjust="spacingAndGlyphs"><tspan fill="#64748b">[00:06] </tspan><tspan fill="#34d399">[Participant]:</tspan><tspan fill="#e2e8f0"> Sure, go ahead.</tspan></text>
+    <text x="814" y="238" textLength="285.6" lengthAdjust="spacingAndGlyphs"><tspan fill="#64748b">[00:09] </tspan><tspan fill="#38bdf8">[You]:</tspan><tspan fill="#e2e8f0"> The build is green.</tspan></text>
+    <text x="814" y="274" textLength="352.8" lengthAdjust="spacingAndGlyphs"><tspan fill="#64748b">[00:12] </tspan><tspan fill="#34d399">[Participant]:</tspan><tspan fill="#e2e8f0"> Then let&#8217;s ship it.</tspan></text>
+  </g>
+</svg>

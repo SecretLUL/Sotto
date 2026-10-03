@@ -268,29 +268,39 @@ def _draw_eye_off(draw: ImageDraw.ImageDraw, S: float, fg: str = None):
 
 
 def _draw_app_logo(draw: ImageDraw.ImageDraw, S: float, fg: str = None):
-    """Audio AI Recorder App Brand Emblem."""
-    # Outer Rounded Hexagon / Card Badge
-    pad = S * 0.04
-    draw.rounded_rectangle(
-        [pad, pad, S - pad, S - pad],
-        radius=S * 0.28,
-        fill="#1e1b4b",
-        outline="#4f46e5",
-        width=int(S * 0.05)
-    )
+    """Sotto's mark, as in assets/logo.svg (drawn on a 512 grid there).
 
-    # Sound Wave bars background
-    bars = [0.3, 0.5, 0.85, 0.6, 0.9, 0.45, 0.3]
-    cx = S * 0.5
-    spacing = S * 0.09
-    start_x = cx - (len(bars) - 1) * spacing / 2
+    An S from two elliptical arcs that meet in the middle: the upper one in the
+    colour of your own voice, the lower one in that of everyone else.
+    """
+    u = S / 512
+    draw.rounded_rectangle([24 * u, 24 * u, 488 * u, 488 * u], radius=116 * u,
+                           fill="#171b25", outline="#2e3445",
+                           width=max(1, round(6 * u)))
 
-    for i, h in enumerate(bars):
-        x = start_x + i * spacing
-        bar_h = S * 0.5 * h
-        color = "#818cf8" if i % 2 == 0 else "#38bdf8"
-        draw.line([x, S * 0.5 - bar_h / 2, x, S * 0.5 + bar_h / 2],
-                  fill=color, width=int(S * 0.05))
+    rx, ry, half = 84 * u, 74 * u, 23 * u
+
+    def band(cy, start, end, steps=64):
+        """The stroke along an arc as one polygon: both edges offset along the
+        ellipse's normal. draw.line() leaves notches between its segments."""
+        outer, inner = [], []
+        for i in range(steps + 1):
+            a = math.radians(start + (end - start) * i / steps)
+            x, y = 256 * u + rx * math.cos(a), cy + ry * math.sin(a)
+            nx, ny = ry * math.cos(a), rx * math.sin(a)
+            scale = half / math.hypot(nx, ny)
+            outer.append((x + nx * scale, y + ny * scale))
+            inner.append((x - nx * scale, y - ny * scale))
+        return outer + inner[::-1], (x, y)
+
+    # Upper arc from one degree past the joint (hidden under the lower one) to
+    # its end at the top right; lower arc from the joint to the bottom left.
+    # The angles are those of logo.svg.
+    for cy, start, end, colour in ((182 * u, 89, 332, "#38bdf8"),
+                                   (330 * u, -90, 152, "#34d399")):
+        outline, (x, y) = band(cy, start, end)
+        draw.polygon(outline, fill=colour)
+        draw.ellipse([x - half, y - half, x + half, y + half], fill=colour)
 
 
 def _draw_transcript(draw: ImageDraw.ImageDraw, S: float, fg: str = None):
