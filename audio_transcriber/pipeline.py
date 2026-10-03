@@ -94,77 +94,118 @@ def live_transcription_possible(settings):
     return not settings.uses_cloud()
 
 
-class _ScratchFiles:
-    """Temporary files of one run: named without user text, gone when it ends.
+class _Worker:
+    """What the closing pass of a recording and the transcription of an
+    uploaded file have in common: a thread, a cancel flag with the backends to
+    cancel along with it, and scratch files that are gone when the run ends.
 
-    Their names come from paths.scratch_name() - ASCII only, because whisper-cli
-    cannot open a file whose name was typed in Turkish or Arabic - and they are
-    removed when the run ends, whether it succeeded, failed or was cancelled.
-    The files used to be named after the recording and cleaned up on success
-    only (and, with "keep raw tracks", not even then).
+    The scratch files are named by paths.scratch_name() - ASCII only, because
+    whisper-cli cannot open a file whose name was typed in Turkish or Arabic -
+    and removed when the run ends, whether it succeeded, failed or was
+    cancelled. They used to be named after the recording and cleaned up on
+    success only (and, with "keep raw tracks", not even then).
+
+    A subclass implements _work(); it is given what run_async() was given.
     """
 
-    _scratch = None
+    thread_name = "worker"
+    # Heading of the error shown when anything but a TranscriptionError ends
+    # the run - the last line of defence, so the window never stays locked.
+    failure_title = "Unexpected error during processing"
 
-    def _scratch_path(self, *labels, suffix=".wav"):
-        path = os.path.join(TMP_DIR, paths.scratch_name(*labels, suffix=suffix))
-        if self._scratch is None:
-            self._scratch = []
-        self._scratch.append(path)
-        return path
-
-    def _remove_scratch(self):
-        for path in self._scratch or ():
-            _try_remove(path)
-        self._scratch = []
-
-
-class Finalizer(_ScratchFiles):
-    """Runs the post-processing of a recording in a worker thread."""
-
-    def __init__(self, bridge, settings, backend_factory=None, live=None):
+    def __init__(self, bridge, settings, backend_factory=None):
         self.bridge = bridge
         self.settings = settings
         # Injectable so the flow can be tested without a real AI backend.
         self.backend_factory = backend_factory or (lambda s: build_backend(s))
-        # LiveTranscriber of this recording, if one ran.
-        self.live = live
         self._backends = []
         self._cancelled = threading.Event()
+        self._scratch = []
 
     def cancel(self):
         self._cancelled.set()
-        if self.live is not None:
-            self.live.cancel()
         for backend in list(self._backends):
             try:
                 backend.cancel()
             except Exception:
                 pass
 
+    def _check_cancelled(self):
+        if self._cancelled.is_set():
+            raise TranscriptionError("Processing cancelled.")
+
     # ------------------------------------------------------------------
-    def run_async(self, recording, base_name):
-        thread = threading.Thread(target=self._run, args=(recording, base_name),
-                                  name="finalize", daemon=True)
+    def _start(self, *args):
+        thread = threading.Thread(target=self._run, args=args,
+                                  name=self.thread_name, daemon=True)
         thread.start()
         return thread
 
-    def _run(self, recording, base_name):
+    def _run(self, *args):
         try:
-            self._process(recording, base_name)
+            self._process(*args)
         except TranscriptionError as exc:
             self.bridge.post(Failed(message=str(exc)))
         except Exception as exc:                      # last line of defence
-            self.bridge.post_exception("Unexpected error during processing", exc)
+            self.bridge.post_exception(self.failure_title, exc)
 
-    # ------------------------------------------------------------------
-    def _process(self, recording, base_name):
+    def _process(self, *args):
         try:
-            self._process_recording(recording, base_name)
+            self._work(*args)
         finally:
             self._remove_scratch()
 
-    def _process_recording(self, recording, base_name):
+    def _work(self, *args):
+        raise NotImplementedError
+
+    # ------------------------------------------------------------------
+    def _transcribe(self, path, kind):
+        backend = self.backend_factory(self.settings)
+        self._backends.append(backend)
+        try:
+            return backend.transcribe(
+                path,
+                language=self.settings.language,
+                log=lambda message: self.bridge.post(Log(message)),
+                track=kind,
+                progress=lambda message: self.bridge.post(Progress(message)),
+            )
+        finally:
+            if backend in self._backends:
+                self._backends.remove(backend)
+
+    def _scratch_path(self, *labels, suffix=".wav"):
+        path = os.path.join(TMP_DIR, paths.scratch_name(*labels, suffix=suffix))
+        self._scratch.append(path)
+        return path
+
+    def _remove_scratch(self):
+        for path in self._scratch:
+            _try_remove(path)
+        self._scratch = []
+
+
+class Finalizer(_Worker):
+    """Runs the post-processing of a recording in a worker thread."""
+
+    thread_name = "finalize"
+
+    def __init__(self, bridge, settings, backend_factory=None, live=None):
+        super().__init__(bridge, settings, backend_factory)
+        # LiveTranscriber of this recording, if one ran.
+        self.live = live
+
+    def cancel(self):
+        self._cancelled.set()
+        if self.live is not None:
+            self.live.cancel()
+        super().cancel()
+
+    def run_async(self, recording, base_name):
+        return self._start(recording, base_name)
+
+    # ------------------------------------------------------------------
+    def _work(self, recording, base_name):
         bridge, settings = self.bridge, self.settings
         out_dir = settings.get_output_dir()
         os.makedirs(out_dir, exist_ok=True)
@@ -239,8 +280,7 @@ class Finalizer(_ScratchFiles):
         # that path is the better one anyway once the work is already done.
         if settings.separate_tracks or any(live_segments.values()):
             for kind, path in asr_paths.items():
-                if self._cancelled.is_set():
-                    raise TranscriptionError("Processing cancelled.")
+                self._check_cancelled()
                 label = "your track" if kind == "mic" else "the system track"
                 bridge.post(Status(f"Transcribing {label}…", "purple"))
                 bridge.post(Log(f"\n--- Transcription: {label} ---\n"))
@@ -354,21 +394,6 @@ class Finalizer(_ScratchFiles):
                 f"{_clock(length / float(dsp.TARGET_RATE))} - only the rest "
                 f"still has to run.\n"))
         return segments, tail_start
-
-    def _transcribe(self, path, kind):
-        backend = self.backend_factory(self.settings)
-        self._backends.append(backend)
-        try:
-            return backend.transcribe(
-                path,
-                language=self.settings.language,
-                log=lambda message: self.bridge.post(Log(message)),
-                track=kind,
-                progress=lambda message: self.bridge.post(Progress(message)),
-            )
-        finally:
-            if backend in self._backends:
-                self._backends.remove(backend)
 
 
 # ----------------------------------------------------------------------
@@ -621,23 +646,11 @@ class LiveTranscriber:
 
 
 # ----------------------------------------------------------------------
-class FileFinalizer(_ScratchFiles):
+class FileFinalizer(_Worker):
     """Runs post-processing and transcription for an uploaded audio file in a worker thread."""
 
-    def __init__(self, bridge, settings, backend_factory=None):
-        self.bridge = bridge
-        self.settings = settings
-        self.backend_factory = backend_factory or (lambda s: build_backend(s))
-        self._backends = []
-        self._cancelled = threading.Event()
-
-    def cancel(self):
-        self._cancelled.set()
-        for backend in list(self._backends):
-            try:
-                backend.cancel()
-            except Exception:
-                pass
+    thread_name = "file-finalize"
+    failure_title = "Unexpected error during file processing"
 
     def run_async(self, file_path, base_name=None):
         if not base_name:
@@ -645,26 +658,9 @@ class FileFinalizer(_ScratchFiles):
             # extension itself. Stripping it here as well cut a second,
             # dot-separated piece off 'Team Meeting 2026.03.10.wav'.
             base_name = paths.safe_output_name(os.path.basename(file_path))
-        thread = threading.Thread(target=self._run, args=(file_path, base_name),
-                                  name="file-finalize", daemon=True)
-        thread.start()
-        return thread
+        return self._start(file_path, base_name)
 
-    def _run(self, file_path, base_name):
-        try:
-            self._process(file_path, base_name)
-        except TranscriptionError as exc:
-            self.bridge.post(Failed(message=str(exc)))
-        except Exception as exc:
-            self.bridge.post_exception("Unexpected error during file processing", exc)
-
-    def _process(self, file_path, base_name):
-        try:
-            self._process_file(file_path, base_name)
-        finally:
-            self._remove_scratch()
-
-    def _process_file(self, file_path, base_name):
+    def _work(self, file_path, base_name):
         bridge, settings = self.bridge, self.settings
         out_dir = settings.get_output_dir()
         os.makedirs(out_dir, exist_ok=True)
@@ -700,15 +696,13 @@ class FileFinalizer(_ScratchFiles):
         asr_path = self._scratch_path("file", suffix=".asr.wav")
         sf.write(asr_path, dsp.normalize_for_asr(audio), dsp.TARGET_RATE, subtype="PCM_16")
 
-        if self._cancelled.is_set():
-            raise TranscriptionError("Processing cancelled.")
+        self._check_cancelled()
 
         bridge.post(Status("Transcribing audio file…", "purple"))
         bridge.post(Log("\n--- Transcription ---\n"))
         segments = self._transcribe(asr_path, "file")
 
-        if self._cancelled.is_set():
-            raise TranscriptionError("Processing cancelled.")
+        self._check_cancelled()
 
         bridge.post(Status("Building transcript…", "orange"))
         lines = []
@@ -725,22 +719,6 @@ class FileFinalizer(_ScratchFiles):
             handle.write(text + "\n")
 
         bridge.post(Finished(text=text, txt_path=txt_path, audio_path=mix_path))
-
-
-    def _transcribe(self, path, kind):
-        backend = self.backend_factory(self.settings)
-        self._backends.append(backend)
-        try:
-            return backend.transcribe(
-                path,
-                language=self.settings.language,
-                log=lambda message: self.bridge.post(Log(message)),
-                track=kind,
-                progress=lambda message: self.bridge.post(Progress(message)),
-            )
-        finally:
-            if backend in self._backends:
-                self._backends.remove(backend)
 
 
 # ----------------------------------------------------------------------
