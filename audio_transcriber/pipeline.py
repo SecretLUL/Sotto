@@ -772,25 +772,35 @@ class LivePreview:
         self._thread.start()
 
     def stop(self):
+        """Ask the preview to end. Never waits for it.
+
+        This runs on the GUI thread. The thread used to be joined for up to five
+        seconds - a frozen window whenever it was in the middle of a model
+        download. It is a daemon and everything it can be busy with is
+        cancellable now: the whisper process is killed and a running download
+        looks at the cancel flag between blocks.
+        """
         self._stop.set()
-        if self._backend is not None:
+        backend = self._backend
+        if backend is not None:
             try:
-                self._backend.cancel()
+                backend.cancel()
             except Exception:
                 pass
-        if self._thread is not None:
-            self._thread.join(timeout=5.0)
-            self._thread = None
+        self._thread = None
 
     def _loop(self):
         preview_path = os.path.join(TMP_DIR, ".live_preview.wav")
         os.makedirs(TMP_DIR, exist_ok=True)
         self._backend = build_backend(self.settings, greedy=True, live=True)
+        if self._stop.is_set():
+            return          # stop() came first and had no backend to cancel yet
 
         try:
             self._backend.prepare(log=lambda m: self.bridge.post(Log(m)))
         except Exception as exc:
-            self.bridge.post(Log(f"Live preview unavailable: {exc}\n"))
+            if not self._stop.is_set():          # a cancel is not worth a line
+                self.bridge.post(Log(f"Live preview unavailable: {exc}\n"))
             return
 
         reported = False

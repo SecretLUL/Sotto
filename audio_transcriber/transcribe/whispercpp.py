@@ -58,13 +58,22 @@ class WhisperCppBackend(Backend):
     # ------------------------------------------------------------------
     def prepare(self, progress=None, log=None):
         """Fetch the binary, the model and optionally the VAD model."""
-        exe = binaries.ensure_whisper_binary(progress=progress, log=log)
-        model = binaries.ensure_model(self.model_name, progress=progress, log=log)
+        # cancel() ends a running download between blocks: the live preview
+        # used to leave the window frozen, waiting for a model it no longer
+        # needed.
+        cancelled = self._cancelled.is_set
+        exe = binaries.ensure_whisper_binary(progress=progress, log=log,
+                                             cancelled=cancelled)
+        model = binaries.ensure_model(self.model_name, progress=progress, log=log,
+                                      cancelled=cancelled)
         vad = None
         if self.use_vad:
             try:
-                vad = binaries.ensure_vad_model(progress=progress, log=log)
+                vad = binaries.ensure_vad_model(progress=progress, log=log,
+                                                cancelled=cancelled)
             except binaries.DownloadError as exc:
+                if self._cancelled.is_set():
+                    raise
                 # VAD is an improvement, not a requirement - do not fail on it.
                 self.use_vad = False
                 self._log(log, f"Note: VAD model unavailable ({exc}). "
@@ -100,7 +109,14 @@ class WhisperCppBackend(Backend):
             raise TranscriptionError(f"Audio file not found: {wav_path}")
 
         self._cancelled.clear()
-        exe, model, vad = self.prepare(progress=progress, log=log)
+        try:
+            exe, model, vad = self.prepare(progress=progress, log=log)
+        except binaries.DownloadError as exc:
+            # A failed download is an expected failure with a message of its
+            # own, not an "unexpected error".
+            if self._cancelled.is_set():
+                raise TranscriptionError("Transcription was cancelled.") from exc
+            raise TranscriptionError(str(exc)) from exc
         # whisper-cli.exe reads its arguments in the ANSI code page; a folder
         # called after a Turkish or Arabic user would make it fail with "input
         # file not found" (see paths.ansi_safe_path). The executable itself

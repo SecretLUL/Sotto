@@ -11,6 +11,7 @@ Two things are covered here:
 import os
 import shutil
 import tempfile
+import threading
 import time
 import unittest
 from collections import namedtuple
@@ -293,6 +294,74 @@ class TestLiveTranscriber(unittest.TestCase):
 
 
 # ----------------------------------------------------------------------
+class TestLivePreviewStop(unittest.TestCase):
+    """stop() runs on the GUI thread, so it must not wait for a download.
+
+    It used to join the thread for up to five seconds: a frozen window whenever
+    the preview was still fetching its model.
+    """
+
+    def test_stop_returns_at_once_even_if_the_thread_cannot_be_interrupted(self):
+        entered = threading.Event()
+        released = threading.Event()
+
+        class StuckBackend:
+            def prepare(self, progress=None, log=None):
+                entered.set()
+                released.wait(timeout=3.0)          # a download that ignores cancel
+                raise RuntimeError("download cancelled")
+
+            def cancel(self):
+                pass
+
+        bridge = FakeBridge()
+        folder = tempfile.mkdtemp()
+        try:
+            with patch.object(pipeline, "TMP_DIR", folder):
+                with patch.object(pipeline, "build_backend",
+                                  lambda *args, **kwargs: StuckBackend()):
+                    preview = pipeline.LivePreview(bridge, Settings(), FakeEngine())
+                    preview.start()
+                    self.assertTrue(entered.wait(5.0))
+
+                    started = time.monotonic()
+                    preview.stop()
+                    elapsed = time.monotonic() - started
+                    released.set()
+                    time.sleep(0.3)         # let the thread end on its own
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+        self.assertLess(elapsed, 0.5, "stop() waited for the thread")
+        logs = " ".join(e.text for e in bridge.events if hasattr(e, "text"))
+        self.assertNotIn("unavailable", logs, "a cancel is not worth a log line")
+
+    def test_a_stop_before_the_backend_exists_prevents_the_download(self):
+        """stop() had no backend to cancel yet - the thread then started a
+        download nobody could stop."""
+        prepared = []
+
+        class Backend:
+            def prepare(self, progress=None, log=None):
+                prepared.append(True)
+
+            def cancel(self):
+                pass
+
+        folder = tempfile.mkdtemp()
+        try:
+            with patch.object(pipeline, "TMP_DIR", folder):
+                with patch.object(pipeline, "build_backend",
+                                  lambda *args, **kwargs: Backend()):
+                    preview = pipeline.LivePreview(FakeBridge(), Settings(),
+                                                   FakeEngine())
+                    preview._stop.set()              # stop() arrived first
+                    preview._loop()
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+        self.assertEqual(prepared, [])
+
+
 class TailBackend(FakeBackend):
     """Puts its segment at the end of whatever file it is handed.
 

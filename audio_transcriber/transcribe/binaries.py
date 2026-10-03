@@ -11,7 +11,9 @@ Fixes H8 and M2:
 """
 
 import hashlib
+import http.client
 import os
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -44,6 +46,20 @@ class DownloadError(RuntimeError):
     pass
 
 
+# One lock per file that is fetched. The live preview and the closing pass can
+# both ask for the same model within seconds of each other; the second one used
+# to delete the first one's half-written .part file (on Windows: a raw
+# PermissionError after the meeting) or download everything again.
+_LOCKS = {}
+_LOCKS_GUARD = threading.Lock()
+
+
+def _lock_for(path):
+    key = os.path.normcase(os.path.abspath(path))
+    with _LOCKS_GUARD:
+        return _LOCKS.setdefault(key, threading.Lock())
+
+
 # ----------------------------------------------------------------------
 def sha256_of(path, chunk=1 << 20):
     digest = hashlib.sha256()
@@ -54,16 +70,25 @@ def sha256_of(path, chunk=1 << 20):
 
 
 def download(url, dest_path, description="File", progress=None,
-             timeout=CONNECT_TIMEOUT):
+             timeout=CONNECT_TIMEOUT, cancelled=None):
     """Download atomically to dest_path.
 
     progress: callable(text) for progress messages (may be None).
+    cancelled: callable() -> bool, asked between blocks; True ends the download
+    with a DownloadError and removes the partial file.
     Raises DownloadError.
     """
     tmp_path = dest_path + ".part"
     os.makedirs(os.path.dirname(dest_path) or ".", exist_ok=True)
     if os.path.exists(tmp_path):
-        os.remove(tmp_path)
+        try:
+            os.remove(tmp_path)
+        except OSError as exc:
+            # On Windows that means another download of this very file is
+            # writing to it - say so instead of leaking a bare PermissionError.
+            raise DownloadError(
+                f"{description}: a partial download is in use by something "
+                f"else ({exc}).") from exc
 
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
@@ -75,6 +100,8 @@ def download(url, dest_path, description="File", progress=None,
 
             with open(tmp_path, "wb") as out:
                 while True:
+                    if cancelled is not None and cancelled():
+                        raise DownloadError(f"{description}: download cancelled.")
                     buffer = response.read(block_size)
                     if not buffer:
                         break
@@ -117,8 +144,14 @@ def download(url, dest_path, description="File", progress=None,
     except urllib.error.URLError as exc:
         raise DownloadError(f"{description}: could not connect "
                             f"({exc.reason}).") from exc
+    except http.client.HTTPException as exc:
+        # IncompleteRead and friends: the connection broke mid-transfer. Not an
+        # OSError, so it used to escape as a bare exception.
+        raise DownloadError(f"{description}: the connection was lost "
+                            f"({exc}).") from exc
     except OSError as exc:
-        raise DownloadError(f"{description}: write error ({exc}).") from exc
+        raise DownloadError(f"{description}: network or disk error "
+                            f"({exc}).") from exc
     finally:
         if os.path.exists(tmp_path):
             try:
@@ -141,77 +174,85 @@ def safe_extract(zip_path, dest_dir):
 
 
 # ----------------------------------------------------------------------
-def ensure_whisper_binary(progress=None, log=None):
+def ensure_whisper_binary(progress=None, log=None, cancelled=None):
     """Make sure whisper-cli.exe is present."""
     if os.path.exists(WHISPER_EXE):
         return WHISPER_EXE
 
-    os.makedirs(BIN_DIR, exist_ok=True)
-    zip_path = os.path.join(BIN_DIR, "whisper-vulkan.zip")
-    if log:
-        log("Downloading whisper.cpp…\n")
-    download(WHISPER_ZIP_URL, zip_path, "whisper.cpp", progress)
+    # Check, lock, check again: whoever waited here finds it done afterwards.
+    with _lock_for(WHISPER_EXE):
+        if os.path.exists(WHISPER_EXE):
+            return WHISPER_EXE
 
-    try:
+        os.makedirs(BIN_DIR, exist_ok=True)
+        zip_path = os.path.join(BIN_DIR, "whisper-vulkan.zip")
         if log:
-            log("Extracting archive…\n")
-        safe_extract(zip_path, BIN_DIR)
-    finally:
-        try:
-            os.remove(zip_path)
-        except OSError:
-            pass
+            log("Downloading whisper.cpp…\n")
+        download(WHISPER_ZIP_URL, zip_path, "whisper.cpp", progress,
+                 cancelled=cancelled)
 
-    # Remove the example programs shipped in the release
-    for item in os.listdir(BIN_DIR):
-        if item.endswith(".exe") and item not in ESSENTIAL:
+        try:
+            if log:
+                log("Extracting archive…\n")
+            safe_extract(zip_path, BIN_DIR)
+        finally:
             try:
-                os.remove(os.path.join(BIN_DIR, item))
+                os.remove(zip_path)
             except OSError:
                 pass
 
-    if not os.path.exists(WHISPER_EXE):
-        raise DownloadError("whisper-cli.exe was not contained in the "
-                            "downloaded archive.")
-    if log:
-        log("whisper.cpp is ready.\n")
-    return WHISPER_EXE
+        # Remove the example programs shipped in the release
+        for item in os.listdir(BIN_DIR):
+            if item.endswith(".exe") and item not in ESSENTIAL:
+                try:
+                    os.remove(os.path.join(BIN_DIR, item))
+                except OSError:
+                    pass
+
+        if not os.path.exists(WHISPER_EXE):
+            raise DownloadError("whisper-cli.exe was not contained in the "
+                                "downloaded archive.")
+        if log:
+            log("whisper.cpp is ready.\n")
+        return WHISPER_EXE
 
 
-def ensure_model(name, progress=None, log=None):
+def _usable(path, minimum):
+    return os.path.exists(path) and os.path.getsize(path) > minimum
+
+
+def ensure_model(name, progress=None, log=None, cancelled=None):
     """Make sure the ggml model is present."""
     path = model_path(name)
-    if os.path.exists(path) and os.path.getsize(path) > 1 << 20:
+    if _usable(path, 1 << 20):
         return path
-    if os.path.exists(path):
-        # File exists but is obviously too small to be usable
-        os.remove(path)
-    if log:
-        log(f"Downloading model '{name}'…\n")
-    return download(MODEL_URL_TEMPLATE.format(name=name), path,
-                    f"Whisper model '{name}'", progress)
+
+    with _lock_for(path):
+        if _usable(path, 1 << 20):
+            return path
+        if os.path.exists(path):
+            # File exists but is obviously too small to be usable
+            os.remove(path)
+        if log:
+            log(f"Downloading model '{name}'…\n")
+        return download(MODEL_URL_TEMPLATE.format(name=name), path,
+                        f"Whisper model '{name}'", progress, cancelled=cancelled)
 
 
-def ensure_vad_model(progress=None, log=None):
+def ensure_vad_model(progress=None, log=None, cancelled=None):
     """Silero VAD for whisper.cpp (0.9 MB).
 
     Covers M11: hallucinations during pauses are prevented at the source
     instead of being filtered out afterwards via RMS thresholds. Off by
     default - see the note in whispercpp.py.
     """
-    if os.path.exists(VAD_MODEL_PATH) and os.path.getsize(VAD_MODEL_PATH) > 100_000:
+    if _usable(VAD_MODEL_PATH, 100_000):
         return VAD_MODEL_PATH
-    if log:
-        log("Downloading voice activity model (VAD)…\n")
-    return download(VAD_MODEL_URL, VAD_MODEL_PATH, "VAD model", progress)
 
-
-def available_models():
-    """Models already downloaded (used for live preview fallbacks)."""
-    found = []
-    if not os.path.isdir(BIN_DIR):
-        return found
-    for item in os.listdir(BIN_DIR):
-        if item.startswith("ggml-") and item.endswith(".bin") and "silero" not in item:
-            found.append(item[len("ggml-"):-len(".bin")])
-    return found
+    with _lock_for(VAD_MODEL_PATH):
+        if _usable(VAD_MODEL_PATH, 100_000):
+            return VAD_MODEL_PATH
+        if log:
+            log("Downloading voice activity model (VAD)…\n")
+        return download(VAD_MODEL_URL, VAD_MODEL_PATH, "VAD model", progress,
+                        cancelled=cancelled)

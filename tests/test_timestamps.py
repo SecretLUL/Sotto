@@ -3,8 +3,8 @@
 import re
 import unittest
 
-from audio_transcriber.transcribe.base import (format_timestamp, parse_line,
-                                               parse_timestamp)
+from audio_transcriber.transcribe.base import (format_clock, format_timestamp,
+                                               parse_line, parse_timestamp)
 
 # Regex of the previous version - kept here as the regression reference.
 OLD_RE = re.compile(
@@ -68,6 +68,18 @@ class TestFormatting(unittest.TestCase):
 
     def test_negative_is_clamped(self):
         self.assertEqual(format_timestamp(-5), "[00:00]")
+
+
+class TestFormatClock(unittest.TestCase):
+    """The same clock as format_timestamp(), for running text instead of a line."""
+
+    def test_minutes_and_hours(self):
+        self.assertEqual(format_clock(0), "00:00")
+        self.assertEqual(format_clock(65), "01:05")
+        self.assertEqual(format_clock(3725), "01:02:05")
+
+    def test_negative_is_clamped(self):
+        self.assertEqual(format_clock(-5), "00:00")
 
 
 if __name__ == "__main__":

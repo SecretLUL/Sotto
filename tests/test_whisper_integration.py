@@ -14,6 +14,7 @@ import numpy as np
 import soundfile as sf
 
 from audio_transcriber import paths
+from audio_transcriber.transcribe import binaries
 from audio_transcriber.transcribe.base import TranscriptionError
 from audio_transcriber.transcribe.whispercpp import WhisperCppBackend
 
@@ -66,6 +67,59 @@ class TestCommandBuilder(unittest.TestCase):
     def test_missing_audio_file_raises(self):
         with self.assertRaises(TranscriptionError):
             WhisperCppBackend("tiny").transcribe("does-not-exist.wav")
+
+
+class TestPrepareAndCancel(unittest.TestCase):
+    """cancel() has to reach the downloads, and a failed download is an
+    expected failure with a message of its own."""
+
+    def test_cancel_reaches_every_download(self):
+        backend = WhisperCppBackend("small")
+        seen = {}
+
+        def fake_binary(progress=None, log=None, cancelled=None):
+            seen["binary"] = cancelled
+            return "exe"
+
+        def fake_model(name, progress=None, log=None, cancelled=None):
+            seen["model"] = cancelled
+            return "model"
+
+        target = "audio_transcriber.transcribe.whispercpp.binaries"
+        with patch(f"{target}.ensure_whisper_binary", fake_binary):
+            with patch(f"{target}.ensure_model", fake_model):
+                backend.prepare()
+
+        self.assertFalse(seen["model"]())
+        backend.cancel()
+        self.assertTrue(seen["model"]())
+        self.assertTrue(seen["binary"]())
+
+    def _transcribe_with_prepare(self, prepare):
+        backend = WhisperCppBackend("small")
+        backend.prepare = lambda progress=None, log=None: prepare(backend)
+        with tempfile.TemporaryDirectory() as folder:
+            wav = os.path.join(folder, "input.wav")
+            open(wav, "wb").close()
+            backend.transcribe(wav, language="de", track="mic")
+
+    def test_a_failed_download_is_a_transcription_error(self):
+        """It used to surface as 'Unexpected error during processing'."""
+        def failing(_backend):
+            raise binaries.DownloadError("Whisper model 'small': could not connect")
+
+        with self.assertRaises(TranscriptionError) as ctx:
+            self._transcribe_with_prepare(failing)
+        self.assertIn("could not connect", str(ctx.exception))
+
+    def test_a_cancel_during_the_download_reads_as_a_cancel(self):
+        def cancelled(backend):
+            backend.cancel()
+            raise binaries.DownloadError("download cancelled")
+
+        with self.assertRaises(TranscriptionError) as ctx:
+            self._transcribe_with_prepare(cancelled)
+        self.assertIn("cancelled", str(ctx.exception))
 
 
 class TestAnsiSafeArguments(unittest.TestCase):
