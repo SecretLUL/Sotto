@@ -35,6 +35,15 @@ from . import widgets as W
 
 METER_INTERVAL_MS = 40
 
+# The window, designed for a 96 dpi screen: what it opens at, and the least it
+# may be shrunk to. Both are scaled with the display and kept within the screen
+# (_size_window); they used to be fixed pixel counts - 900 high at the least,
+# which does not fit a 1366x768 laptop at all.
+WINDOW_SIZE = (920, 980)
+WINDOW_MIN_SIZE = (700, 600)
+# What the screen keeps for itself: window frame, title bar, taskbar.
+SCREEN_MARGIN = (24, 96)
+
 # How long Start waits for an in-flight device reconfiguration before giving up
 # and letting the engine report whatever is actually wrong. configure() joins
 # its reader threads with a 2 s timeout each, so this leaves room for both.
@@ -54,10 +63,9 @@ class RecorderApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Audio AI Recorder")
-        self.root.geometry("920x980")
-        self.root.minsize(840, 900)
 
-        T.apply(root)
+        T.apply(root)                    # first: it sets the display scaling
+        self._size_window()
 
         self.settings, warnings = config.load()
         self.pa = pyaudio.PyAudio()
@@ -100,6 +108,17 @@ class RecorderApp:
     # ==================================================================
     # Construction
     # ==================================================================
+    def _size_window(self):
+        """Open at a size that suits this screen and its display scaling."""
+        room = (max(1, self.root.winfo_screenwidth() - T.px(SCREEN_MARGIN[0])),
+                max(1, self.root.winfo_screenheight() - T.px(SCREEN_MARGIN[1])))
+        width, height = (min(T.px(wanted), available)
+                         for wanted, available in zip(WINDOW_SIZE, room))
+        least = (min(T.px(WINDOW_MIN_SIZE[0]), width),
+                 min(T.px(WINDOW_MIN_SIZE[1]), height))
+        self.root.geometry(f"{width}x{height}")
+        self.root.minsize(*least)
+
     def _build(self):
         outer = tk.Frame(self.root, bg=T.BG)
         outer.pack(fill=tk.BOTH, expand=True, padx=T.XL, pady=(T.LG, T.LG))
@@ -117,16 +136,19 @@ class RecorderApp:
         self.notebook.add(self.tab_settings, text="  ⚙️ Settings  ")
         self.notebook.add(self.tab_transcript, text="  📄 Transcript  ")
 
-        # Tab 1: Recorder
-        recorder_container = tk.Frame(self.tab_recorder, bg=T.BG)
-        recorder_container.pack(fill=tk.BOTH, expand=True, pady=(T.SM, 0))
+        # Tab 1: Recorder. The first two tabs scroll where the screen cannot
+        # give the window their full height (W.Scroller).
+        recorder_page = W.Scroller(self.tab_recorder)
+        recorder_page.pack(fill=tk.BOTH, expand=True, pady=(T.SM, 0))
+        recorder_container = recorder_page.body
         self._build_recovery_banner(recorder_container)
         self._build_sources(recorder_container)
         self._build_record_bar(recorder_container)
 
         # Tab 2: Settings
-        settings_container = tk.Frame(self.tab_settings, bg=T.BG)
-        settings_container.pack(fill=tk.BOTH, expand=True, pady=(T.SM, 0))
+        settings_page = W.Scroller(self.tab_settings)
+        settings_page.pack(fill=tk.BOTH, expand=True, pady=(T.SM, 0))
+        settings_container = settings_page.body
         self._build_ai(settings_container)
         self._build_output_folder(settings_container)
         self._build_options_card(settings_container)
@@ -144,7 +166,7 @@ class RecorderApp:
         left = tk.Frame(head, bg=T.BG)
         left.pack(side=tk.LEFT)
 
-        self._icon_refs["logo"] = icons.get_icon("app_logo", size=42)
+        self._icon_refs["logo"] = icons.get_icon("app_logo", size=T.px(42))
         tk.Label(left, image=self._icon_refs["logo"], bg=T.BG).pack(
             side=tk.LEFT, padx=(0, T.MD))
 
@@ -156,7 +178,7 @@ class RecorderApp:
             text_frame, bg=T.BG, fg=T.TEXT_MUTE, font=T.fonts["small"], anchor="w",
             text=f"whisper.cpp · {self.settings.threads()} threads · "
                  f"ElevenLabs Scribe")
-        self.subtitle.pack(anchor="w", pady=(2, 0))
+        self.subtitle.pack(anchor="w", pady=(T.px(2), 0))
 
         self.status = W.StatusPill(head, bg=T.BG, width=260, height=36)
         self.status.pack(side=tk.RIGHT, anchor="e")
@@ -203,7 +225,7 @@ class RecorderApp:
         head.grid(row=row, column=0, columnspan=3, sticky="ew")
         head.columnconfigure(1, weight=1)
 
-        self._icon_refs[f"src_{row}"] = icons.get_icon(icon_name, size=26)
+        self._icon_refs[f"src_{row}"] = icons.get_icon(icon_name, size=T.px(26))
         tk.Label(head, image=self._icon_refs[f"src_{row}"], bg=T.CARD).grid(
             row=0, column=0, sticky="w", padx=(0, T.SM))
         tk.Label(head, text=label, bg=T.CARD, fg=T.TEXT_DIM,
@@ -212,7 +234,7 @@ class RecorderApp:
 
         combo = ttk.Combobox(head, state="readonly", style="Dark.TCombobox",
                              font=T.fonts["body"])
-        combo.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(6, 6))
+        combo.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(T.px(6), T.px(6)))
         combo.bind("<<ComboboxSelected>>", lambda _e: self.restart_monitoring())
 
         meter = W.Meter(head, width=560, height=18)
@@ -220,7 +242,7 @@ class RecorderApp:
 
 
         gain_row = tk.Frame(head, bg=T.CARD)
-        gain_row.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(5, 0))
+        gain_row.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(T.px(5), 0))
         gain_row.columnconfigure(1, weight=1)
         tk.Label(gain_row, text="Gain", bg=T.CARD, fg=T.TEXT_MUTE,
                  font=T.fonts["tiny"], width=5, anchor="w").grid(row=0, column=0)
@@ -274,7 +296,7 @@ class RecorderApp:
                                      kind="ghost", width=84, height=32,
                                      command=self._toggle_key)
         self.show_key_btn.grid(row=0, column=1, sticky="n",
-                               padx=(T.SM, 0), pady=(22, 0))
+                               padx=(T.SM, 0), pady=(T.px(22), 0))
         self._key_visible = False
 
     # ------------------------------------------------------------------
@@ -302,12 +324,12 @@ class RecorderApp:
         browse_btn = W.Button(wrap, text="Browse...", icon_name="upload",
                               kind="quiet", width=100, height=32,
                               command=self._browse_output_dir)
-        browse_btn.grid(row=0, column=1, sticky="s", padx=(T.SM, 0), pady=(22, 0))
+        browse_btn.grid(row=0, column=1, sticky="s", padx=(T.SM, 0), pady=(T.px(22), 0))
 
         reset_btn = W.Button(wrap, text="Reset", kind="ghost",
                              width=74, height=32,
                              command=self._reset_output_dir)
-        reset_btn.grid(row=0, column=2, sticky="s", padx=(T.XS, 0), pady=(22, 0))
+        reset_btn.grid(row=0, column=2, sticky="s", padx=(T.XS, 0), pady=(T.px(22), 0))
 
     def _browse_output_dir(self):
         current = self.output_dir_entry.get().strip() or self.settings.get_output_dir()
@@ -385,23 +407,23 @@ class RecorderApp:
         self.timer_label = tk.Label(body, text="00:00", bg=T.CARD,
                                     fg=T.TEXT_MUTE, font=T.fonts["display"])
         self.timer_label.grid(row=0, column=1, sticky="s", padx=(0, T.LG),
-                              pady=(0, 2))
+                              pady=(0, T.px(2)))
 
         self.upload_btn = W.Button(body, text="Upload file", icon_name="upload",
                                    kind="quiet", width=130, height=42,
                                    command=self.upload_and_transcribe)
-        self.upload_btn.grid(row=0, column=2, sticky="s", padx=(0, T.SM), pady=(0, 1))
+        self.upload_btn.grid(row=0, column=2, sticky="s", padx=(0, T.SM), pady=(0, T.px(1)))
 
         self.start_btn = W.Button(body, text="Start recording", icon_name="record",
                                   kind="record", width=170, height=42,
                                   command=self.start_recording)
-        self.start_btn.grid(row=0, column=3, sticky="s", pady=(0, 1))
+        self.start_btn.grid(row=0, column=3, sticky="s", pady=(0, T.px(1)))
 
         self.stop_btn = W.Button(body, text="Stop", icon_name="stop", kind="stop",
                                  width=100, height=42, state="disabled",
                                  command=self.stop_recording)
         self.stop_btn.grid(row=0, column=4, sticky="s", padx=(T.SM, 0),
-                           pady=(0, 1))
+                           pady=(0, T.px(1)))
 
 
     # ------------------------------------------------------------------

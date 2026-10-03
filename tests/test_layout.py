@@ -23,7 +23,7 @@ except Exception:                                   # pragma: no cover
     HAVE_DISPLAY = False
 
 
-def pump(root, rounds=8):
+def pump(root, rounds=20):
     for _ in range(rounds):
         root.update_idletasks()
         root.update()
@@ -32,6 +32,14 @@ def pump(root, rounds=8):
 def box(widget):
     left, top = widget.winfo_rootx(), widget.winfo_rooty()
     return left, top, left + widget.winfo_width(), top + widget.winfo_height()
+
+
+def wheel_down(widget):
+    """One notch of the mouse wheel over `widget`, as the platform sends it."""
+    if widget.tk.call("tk", "windowingsystem") == "x11":
+        widget.event_generate("<Button-5>")
+    else:
+        widget.event_generate("<MouseWheel>", delta=-120)
 
 
 def describe(widget):
@@ -53,6 +61,8 @@ def problems(widget, found=None):
             continue
         pl, pt, pr, pb = box(widget)
         cl, ct, cr, cb = box(child)
+        if isinstance(widget.master, W.Scroller) and child is widget.master.body:
+            pt, pb = ct, cb             # a page taller than its window scrolls
         if cr > pr + 1 or cb > pb + 1 or cl < pl - 1 or ct < pt - 1:
             found.append(f"{describe(child)} sticks out of {describe(widget)}: "
                          f"{(cl, ct, cr, cb)} not within {(pl, pt, pr, pb)}")
@@ -65,17 +75,25 @@ def problems(widget, found=None):
 
 
 class ShownApp:
-    """The real window, laid out for real, with audio and settings stubbed."""
+    """The real window, laid out for real, with audio and settings stubbed.
 
-    def __init__(self, width=920, height=980):
+    dpi simulates a display scaling and screen a screen of that size; with a
+    screen the window keeps the size it picks for it, without one it is made
+    width x height.
+    """
+
+    def __init__(self, width=920, height=980, dpi=None, screen=None):
         self.size = (width, height)
+        self.dpi = dpi
+        self.screen = screen
 
     def __enter__(self):
         from audio_transcriber import config, preflight
         from audio_transcriber.audio.capture import AudioEngine
-        from audio_transcriber.ui import icons
+        from audio_transcriber.ui import icons, theme
         from audio_transcriber.ui.app import RecorderApp
 
+        self._scale_before = theme.SCALE
         icons._ICON_CACHE.clear()
         self.out_dir = tempfile.mkdtemp()
         settings = config.Settings(output_dir=self.out_dir)
@@ -84,12 +102,23 @@ class ShownApp:
             patch.object(AudioEngine, "configure", return_value=[]),
             patch.object(preflight, "check", return_value=[]),
         ]
+        if self.dpi:
+            self.patches.append(patch.object(
+                theme, "_display_dpi", lambda root, _dpi=self.dpi: float(_dpi)))
+        if self.screen:
+            width, height = self.screen
+            self.patches += [
+                patch.object(tk.Misc, "winfo_screenwidth", lambda _w: width),
+                patch.object(tk.Misc, "winfo_screenheight", lambda _w: height)]
         for patcher in self.patches:
             patcher.start()
         self.root = tk.Tk()
+        # 'tk scaling' belongs to the display, not to this window: the next
+        # Tk() in the process would take on a simulated dpi. Put back in __exit__.
+        self._tk_scaling = self.root.tk.call("tk", "scaling")
         self.root.withdraw()
         self.app = RecorderApp(self.root)
-        self.root.geometry("%dx%d+0+0" % self.size)
+        self.root.geometry("+0+0" if self.screen else "%dx%d+0+0" % self.size)
         try:
             self.root.attributes("-alpha", 0.0)
         except tk.TclError:                          # pragma: no cover
@@ -100,12 +129,14 @@ class ShownApp:
 
     def __exit__(self, *_exc):
         import shutil
-        from audio_transcriber.ui import icons
+        from audio_transcriber.ui import icons, theme
         from unittest.mock import patch as _patch
+        self.root.tk.call("tk", "scaling", self._tk_scaling)
         with _patch("audio_transcriber.ui.app.messagebox"):
             self.app.on_close()
         for patcher in self.patches:
             patcher.stop()
+        theme._set_scale(self._scale_before * 96)     # no scaling left behind
         icons._ICON_CACHE.clear()
         shutil.rmtree(self.out_dir, ignore_errors=True)
 
@@ -360,6 +391,236 @@ class TestSourcesCardHint(unittest.TestCase):
             card = shown.app.sources_card
             text = card.itemcget(card._hint_item, "text")
             self.assertTrue(text.startswith(("System audio captured from:", "⚠")), text)
+
+
+@unittest.skipUnless(HAVE_DISPLAY, "no graphical display available")
+class TestDisplayScaling(unittest.TestCase):
+    """Pixel sizes follow the display: at 150 % the caption of 'Start recording'
+    (186 px) was wider than its 170 px button, and 'Upload file' ran under it."""
+
+    # Display scalings, each on a screen it is commonly found on. Where the
+    # screen cannot give the window the full height, the tabs scroll.
+    SETUPS = ((96, (1366, 768)), (120, (1920, 1080)), (144, (1920, 1080)),
+              (192, (2560, 1440)))
+    LARGE_SCREEN = (3840, 2160)
+
+    def test_nothing_is_cut_off_at_any_display_scaling(self):
+        for dpi, screen in self.SETUPS:
+            with self.subTest(dpi=dpi, screen=screen), \
+                    ShownApp(dpi=dpi, screen=screen) as shown:
+                for name in TABS:
+                    tab = shown.show(name)
+                    self.assertEqual(problems(tab), [], f"{name} at {dpi} dpi")
+
+    def test_the_window_fits_on_the_screen(self):
+        for dpi, screen in self.SETUPS:
+            with self.subTest(dpi=dpi, screen=screen), \
+                    ShownApp(dpi=dpi, screen=screen) as shown:
+                self.assertLessEqual(shown.root.winfo_width(), screen[0])
+                self.assertLessEqual(shown.root.winfo_height(), screen[1])
+
+    def test_every_button_is_wide_enough_for_its_caption(self):
+        from audio_transcriber.ui import theme as T
+        for dpi, screen in self.SETUPS:
+            with self.subTest(dpi=dpi), ShownApp(dpi=dpi, screen=screen) as shown:
+                for name in TABS:
+                    shown.show(name)
+                buttons = list(_walk(shown.root, "Button"))
+                self.assertTrue(buttons)
+                for button in buttons:
+                    needed = button.content_width() + 2 * T.px(button.PAD_X)
+                    self.assertGreaterEqual(button.winfo_reqwidth(), needed,
+                                            f"{describe(button)} at {dpi} dpi")
+
+    def test_sizes_grow_with_the_display(self):
+        heights = {}
+        for dpi in (96, 192):
+            with ShownApp(dpi=dpi, screen=self.LARGE_SCREEN) as shown:
+                shown.show("tab_recorder")
+                heights[dpi] = shown.app.start_btn.winfo_height()
+        self.assertAlmostEqual(heights[192] / heights[96], 2.0, delta=0.1)
+
+    def test_the_status_pill_grows_to_fit_a_long_status(self):
+        from audio_transcriber.ui import theme as T
+        text = "processing recovered recording…"
+        for dpi in (96, 192):
+            with self.subTest(dpi=dpi), \
+                    ShownApp(dpi=dpi, screen=self.LARGE_SCREEN) as shown:
+                shown.app.status.set(text)
+                pump(shown.root)
+                needed = T.fonts["small"].measure(text) + T.px(32)
+                self.assertGreaterEqual(shown.app.status.winfo_reqwidth(), needed)
+
+    def test_a_simulated_scaling_does_not_outlive_its_window(self):
+        """'tk scaling' belongs to the display: a 200 % run made every later
+        window of the test process think it was on a 200 % screen."""
+        def dpi_of_a_new_window():
+            root = tk.Tk()
+            try:
+                return root.winfo_fpixels("1i")
+            finally:
+                root.destroy()
+
+        before = dpi_of_a_new_window()
+        with ShownApp(dpi=192, screen=self.LARGE_SCREEN):
+            pass
+        self.assertAlmostEqual(dpi_of_a_new_window(), before, delta=0.5)
+
+
+@unittest.skipUnless(HAVE_DISPLAY, "no graphical display available")
+class TestTooLittleRoom(unittest.TestCase):
+    """Where the screen cannot give the window the height of a tab, the tab
+    scrolls. At 200 % on a 1440p screen the Settings tab needs 1082 px and gets
+    922: pack gave the Processing Options card 142 of the 302 px it asked for
+    and cut it off - at 150 % on a 1080p screen, too."""
+
+    def test_the_settings_scroll_instead_of_being_cut_off(self):
+        with ShownApp(dpi=192, screen=(2560, 1440)) as shown:
+            tab = shown.show("tab_settings")
+            self.assertEqual(problems(tab), [])
+            page = next(_walk(tab, "Scroller"))
+            self.assertTrue(page.scrolling)
+
+            page.canvas.yview_moveto(1.0)
+            pump(shown.root)
+            _left, top, _right, bottom = box(shown.app.save_settings_btn)
+            view = box(page.canvas)
+            self.assertGreaterEqual(top, view[1], "'Save settings' can be reached")
+            self.assertLessEqual(bottom, view[3], "'Save settings' can be reached")
+
+    def test_a_window_with_room_enough_does_not_scroll(self):
+        with ShownApp() as shown:
+            for name in ("tab_recorder", "tab_settings"):
+                page = next(_walk(shown.show(name), "Scroller"))
+                self.assertFalse(page.scrolling, name)
+                self.assertFalse(page.scrollbar.winfo_ismapped(), name)
+
+
+@unittest.skipUnless(HAVE_DISPLAY, "no graphical display available")
+class TestScroller(unittest.TestCase):
+    """A page that scrolls where it is taller than the room it is given."""
+
+    def setUp(self):
+        from audio_transcriber.ui import theme
+        self.root = tk.Tk()
+        self.root.withdraw()
+        theme.apply(self.root)
+        self.addCleanup(self.root.destroy)
+
+    def _show(self, room):
+        self.root.geometry(f"300x{room}+0+0")
+        try:
+            self.root.attributes("-alpha", 0.0)
+        except tk.TclError:                          # pragma: no cover
+            pass
+        self.root.deiconify()
+        pump(self.root)
+
+    def _page(self, room, content=400):
+        from audio_transcriber.ui import widgets as W
+        page = W.Scroller(self.root)
+        page.pack(fill=tk.BOTH, expand=True)
+        block = tk.Frame(page.body, width=200, height=content)
+        block.pack(fill=tk.X)
+        self._show(room)
+        return page, block
+
+    def _combo(self, page):
+        from tkinter import ttk
+        combo = ttk.Combobox(page.body, values=["a", "b", "c"], state="readonly")
+        combo.current(0)
+        combo.pack(fill=tk.X)
+        pump(self.root)
+        return combo
+
+    def test_a_page_that_fits_has_no_scrollbar(self):
+        page, _block = self._page(room=500)
+        self.assertFalse(page.scrolling)
+        self.assertFalse(page.scrollbar.winfo_ismapped())
+
+    def test_a_page_that_does_not_fit_keeps_its_height_and_scrolls(self):
+        page, block = self._page(room=200)
+        self.assertTrue(page.scrolling)
+        self.assertTrue(page.scrollbar.winfo_ismapped())
+        self.assertEqual(block.winfo_height(), 400, "it must not be squeezed")
+        page.canvas.yview_moveto(1.0)
+        pump(self.root)
+        self.assertAlmostEqual(box(block)[3], box(page.canvas)[3], delta=1,
+                               msg="scrolled to the end, the end is in view")
+
+    def test_the_page_is_as_wide_as_its_window(self):
+        page, _block = self._page(room=200)
+        self.assertEqual(page.body.winfo_width(), page.canvas.winfo_width())
+
+    def test_the_scrollbar_can_be_seen_and_grabbed(self):
+        """clam makes the thumb as thick as -arrowsize, which the style set to
+        0: the scrollbar (the transcript's too) was 1 px wide."""
+        from audio_transcriber.ui import theme as T
+        page, _block = self._page(room=200)
+        self.assertGreaterEqual(page.scrollbar.winfo_width(), T.px(12))
+
+    def test_with_room_again_the_scrollbar_goes_and_the_page_is_back_at_the_top(self):
+        page, _block = self._page(room=200)
+        page.canvas.yview_moveto(1.0)
+        self._show(600)
+        self.assertFalse(page.scrolling)
+        self.assertFalse(page.scrollbar.winfo_ismapped())
+        self.assertEqual(page.canvas.yview()[0], 0.0)
+
+    def test_the_wheel_scrolls_the_page_from_anywhere_on_it(self):
+        page, block = self._page(room=200)
+        wheel_down(block)
+        self.assertGreater(page.canvas.yview()[0], 0.0)
+
+    def test_a_combo_box_the_pointer_passes_does_not_catch_the_wheel(self):
+        page, _block = self._page(room=200)
+        combo = self._combo(page)
+        wheel_down(combo)
+        self.assertEqual(combo.current(), 0, "its value must not change")
+        self.assertGreater(page.canvas.yview()[0], 0.0)
+
+    def test_a_combo_box_with_the_focus_keeps_the_wheel(self):
+        page, _block = self._page(room=200)
+        combo = self._combo(page)
+        combo.focus_force()
+        pump(self.root)
+        if str(self.root.tk.call("focus")) != str(combo):    # pragma: no cover
+            self.skipTest("the window cannot take the keyboard focus here")
+        wheel_down(combo)
+        self.assertEqual(combo.current(), 1)
+        self.assertEqual(page.canvas.yview()[0], 0.0)
+
+    def test_while_everything_fits_the_widgets_keep_the_wheel(self):
+        page, _block = self._page(room=600)
+        combo = self._combo(page)
+        wheel_down(combo)
+        self.assertEqual(combo.current(), 1)
+
+
+class TestThemeScale(unittest.TestCase):
+    def tearDown(self):
+        from audio_transcriber.ui import theme
+        theme._set_scale(96)
+
+    def test_lengths_scale_and_never_vanish(self):
+        from audio_transcriber.ui import theme
+        theme._set_scale(144)
+        self.assertEqual(theme.px(10), 15)
+        self.assertGreaterEqual(theme.px(1), 1)
+        self.assertEqual(theme.px(0), 0)
+
+    def test_a_display_below_96_dpi_is_not_shrunk(self):
+        from audio_transcriber.ui import theme
+        theme._set_scale(72)
+        self.assertEqual(theme.SCALE, 1.0)
+        self.assertEqual(theme.px(10), 10)
+
+    def test_the_spacing_constants_follow(self):
+        from audio_transcriber.ui import theme
+        theme._set_scale(192)
+        self.assertEqual(theme.XL, 52)
+        theme._set_scale(96)
+        self.assertEqual(theme.XL, 26)
 
 
 def _walk(widget, class_name):

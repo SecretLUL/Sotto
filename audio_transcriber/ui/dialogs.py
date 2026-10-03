@@ -17,7 +17,7 @@ from . import icons
 from . import theme as T
 from . import widgets as W
 
-MIN_WIDTH = 620
+MIN_WIDTH = 620                  # at 96 dpi (T.px)
 
 
 def ask_output_conflict(parent, out_dir, base_name, extensions=None):
@@ -90,7 +90,7 @@ class _Modal(tk.Toplevel):
     def _place_over(self, parent):
         """Centre the dialog on the main window, slightly above the middle."""
         self.update_idletasks()
-        width = max(MIN_WIDTH, self.winfo_reqwidth())
+        width = max(T.px(MIN_WIDTH), self.winfo_reqwidth())
         height = self.winfo_reqheight()
         try:
             x = parent.winfo_rootx() + (parent.winfo_width() - width) // 2
@@ -101,8 +101,9 @@ class _Modal(tk.Toplevel):
 
     @staticmethod
     def _button(parent, text, kind, command):
+        # The button grows to fit its caption; 96 is only the least width.
         return W.Button(parent, text=text, kind=kind, bg=T.BG, height=38,
-                        width=_button_width(text), command=command)
+                        width=96, command=command)
 
 
 class OutputConflictDialog(_Modal):
@@ -131,12 +132,12 @@ class OutputConflictDialog(_Modal):
 
         head = tk.Frame(frame, bg=T.BG)
         head.pack(fill=tk.X)
-        self._icon = icons.get_icon("warning", size=30)
+        self._icon = icons.get_icon("warning", size=T.px(30))
         tk.Label(head, image=self._icon, bg=T.BG).pack(side=tk.LEFT, padx=(0, T.SM))
         tk.Label(head, text="This file already exists", bg=T.BG, fg=T.TEXT,
                  font=T.fonts["title"], anchor="w").pack(side=tk.LEFT)
 
-        wrap = MIN_WIDTH - 2 * T.XL
+        wrap = T.px(MIN_WIDTH) - 2 * T.XL
         self.message = tk.Label(frame, bg=T.BG, fg=T.TEXT_DIM,
                                 font=T.fonts["small"], anchor="w",
                                 justify="left", wraplength=wrap)
@@ -195,7 +196,7 @@ class OutputConflictDialog(_Modal):
         self.entry.selection_range(0, tk.END)
 
         label = f'Number it: {self.suggestion}'
-        self.number_btn.configure(text=label, width=_button_width(label))
+        self.number_btn.configure(text=label)
         self._check_entry()
 
     def _check_entry(self):
@@ -251,12 +252,12 @@ class RecoveryDialog(_Modal):
 
         head = tk.Frame(frame, bg=T.BG)
         head.pack(fill=tk.X)
-        self._icon = icons.get_icon("warning", size=30)
+        self._icon = icons.get_icon("warning", size=T.px(30))
         tk.Label(head, image=self._icon, bg=T.BG).pack(side=tk.LEFT, padx=(0, T.SM))
         tk.Label(head, text="An unfinished recording was found", bg=T.BG,
                  fg=T.TEXT, font=T.fonts["title"], anchor="w").pack(side=tk.LEFT)
 
-        wrap = MIN_WIDTH - 2 * T.XL
+        wrap = T.px(MIN_WIDTH) - 2 * T.XL
         self.message = tk.Label(
             frame, bg=T.BG, fg=T.TEXT_DIM, font=T.fonts["small"], anchor="w",
             justify="left", wraplength=wrap, text=describe_unfinished(self.unfinished))
@@ -294,10 +295,6 @@ def describe_unfinished(unfinished):
     written = time.strftime("%Y-%m-%d %H:%M", time.localtime(unfinished.modified))
     return (f"'{unfinished.base_name}' - {format_clock(unfinished.duration_s)} "
             f"of {kinds}, last written {written}.")
-
-
-def _button_width(text):
-    return T.fonts["button"].measure(text) + 40
 
 
 def _join(names):

@@ -9,6 +9,7 @@ Every colour and spacing value lives here - no colour literals are allowed
 anywhere else in the UI code.
 """
 
+import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk
 
@@ -51,13 +52,43 @@ SPEAKER_OTHER = "#34d399"
 TIMESTAMP = "#64748b"
 
 # ----------------------------------------------------------------------
-# Spacing (4 point grid)
+# Spacing (4 point grid) and display scaling
 # ----------------------------------------------------------------------
-XS, SM, MD, LG, XL, XXL = 6, 10, 14, 18, 26, 34
+# Every length in the interface is designed for a 96 dpi screen and passes
+# through px(). Fonts follow the display by themselves (tk scaling turns points
+# into pixels), pixel counts do not: at 150 % the caption of 'Start recording'
+# was wider than its 170 px button. apply() sets SCALE and the values below.
+SCALE = 1.0
 
-RADIUS_CARD = 16
-RADIUS_CTRL = 9
+_BASE_SPACING = (6, 10, 14, 18, 26, 34)
+_BASE_RADII = (16, 9)
+
+XS, SM, MD, LG, XL, XXL = _BASE_SPACING
+RADIUS_CARD, RADIUS_CTRL = _BASE_RADII
 RADIUS_PILL = 999
+
+
+def px(length):
+    """A length designed for a 96 dpi screen, in pixels on this one."""
+    if not length:
+        return 0
+    return max(1, int(round(length * SCALE)))
+
+
+def _set_scale(dpi):
+    global SCALE, XS, SM, MD, LG, XL, XXL, RADIUS_CARD, RADIUS_CTRL
+    SCALE = max(1.0, dpi / 96.0)
+    XS, SM, MD, LG, XL, XXL = (px(value) for value in _BASE_SPACING)
+    RADIUS_CARD, RADIUS_CTRL = (px(value) for value in _BASE_RADII)
+
+
+def _display_dpi(root):
+    """Pixels per inch of the screen the window is on (96 if it cannot tell)."""
+    try:
+        return float(root.winfo_fpixels("1i"))
+    except tk.TclError:
+        return 96.0
+
 
 _FAMILY = "Segoe UI"
 _MONO = "Consolas"
@@ -75,10 +106,10 @@ def _pick_family(root, *candidates):
 
 def apply(root):
     """Set up fonts, ttk styles and global options."""
+    dpi = _display_dpi(root)
+    _set_scale(dpi)
     try:
-        dpi = root.winfo_fpixels('1i')
-        scaling = max(1.2, dpi / 72.0)
-        root.tk.call('tk', 'scaling', scaling)
+        root.tk.call('tk', 'scaling', max(1.2, dpi / 72.0))
     except Exception:
         pass
 
@@ -122,7 +153,8 @@ def apply(root):
                         arrowcolor=TEXT_DIM, bordercolor=FIELD,
                         lightcolor=BORDER, darkcolor=BORDER,
                         selectbackground=FIELD, selectforeground=TEXT,
-                        insertcolor=TEXT, padding=(12, 8), arrowsize=14)
+                        insertcolor=TEXT, padding=(px(12), px(8)),
+                        arrowsize=px(14))
         style.map(name,
                   background=[("readonly", FIELD), ("active", FIELD),
                               ("pressed", FIELD), ("disabled", BG_DEEP)],
@@ -146,7 +178,7 @@ def apply(root):
     style.configure("Dark.TEntry",
                     fieldbackground=FIELD, foreground=TEXT, insertcolor=ACCENT,
                     bordercolor=FIELD, lightcolor=BORDER, darkcolor=BORDER,
-                    padding=(12, 8), selectbackground=ACCENT_LO,
+                    padding=(px(12), px(8)), selectbackground=ACCENT_LO,
                     selectforeground="#ffffff")
     style.map("Dark.TEntry",
               fieldbackground=[("disabled", BG_DEEP)],
@@ -155,10 +187,13 @@ def apply(root):
               darkcolor=[("focus", ACCENT)])
 
     # --- Scrollbar -----------------------------------------------------
+    # clam has no -width: its thumb is as thick as -arrowsize. That was 0 (to
+    # hide arrows the layout below does not have anyway), which left a
+    # scrollbar 1 px wide.
     style.configure("Dark.Vertical.TScrollbar",
                     background=BORDER, troughcolor=CARD, bordercolor=CARD,
                     arrowcolor=CARD, darkcolor=BORDER, lightcolor=BORDER,
-                    arrowsize=0, width=12)
+                    arrowsize=px(12))
     style.map("Dark.Vertical.TScrollbar",
               background=[("active", BORDER_HI), ("pressed", ACCENT)])
 
@@ -167,9 +202,10 @@ def apply(root):
             ("Vertical.Scrollbar.thumb", {"expand": 1, "sticky": "nswe"})]})])
 
     # --- Notebook (Tabs) -----------------------------------------------
-    style.configure("TNotebook", background=BG, borderwidth=0, tabmargins=[0, 0, 0, 8])
+    style.configure("TNotebook", background=BG, borderwidth=0,
+                    tabmargins=[0, 0, 0, px(8)])
     style.configure("TNotebook.Tab", background=CARD, foreground=TEXT_DIM,
-                    padding=(22, 11), font=fonts["button"], borderwidth=0,
+                    padding=(px(22), px(11)), font=fonts["button"], borderwidth=0,
                     focuscolor="", lightcolor=BORDER, darkcolor=BORDER)
 
     style.map("TNotebook.Tab",

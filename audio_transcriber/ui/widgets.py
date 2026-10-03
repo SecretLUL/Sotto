@@ -26,13 +26,14 @@ class Card(tk.Canvas):
 
     def __init__(self, parent, title=None, hint=None, pad=(16, 13),
                  bg=T.BG, fill=T.CARD, stretch=False, icon_name=None):
-        super().__init__(parent, bg=bg, highlightthickness=0, bd=0, height=64)
-        self.padx, self.pady = pad
+        super().__init__(parent, bg=bg, highlightthickness=0, bd=0,
+                         height=T.px(64))
+        self.padx, self.pady = T.px(pad[0]), T.px(pad[1])
         self._fill = fill
         self._title = title
         self._hint = hint
         self._icon_name = icon_name
-        self._head_h = 26 if title else 0
+        self._head_h = T.px(26) if title else 0
         self._shape = None
         self._icon_img = None
         self._syncing = False
@@ -47,9 +48,9 @@ class Card(tk.Canvas):
         if title:
             x_off = self.padx
             if icon_name:
-                self._icon_img = icons.get_icon(icon_name, size=16)
+                self._icon_img = icons.get_icon(icon_name, size=T.px(16))
                 self.create_image(self.padx, self.pady - 1, anchor="nw", image=self._icon_img)
-                x_off += 22
+                x_off += T.px(22)
             self._title_item = self.create_text(
                 x_off, self.pady - 1, anchor="nw", text=title.upper(),
                 fill=T.TEXT_DIM, font=T.fonts["section"])
@@ -75,7 +76,7 @@ class Card(tk.Canvas):
         """Show the hint at the right edge, cut short before it reaches the heading."""
         text = self._hint_text
         if width > 1:
-            room = width - self.padx - self._title_end - 16
+            room = width - self.padx - self._title_end - T.px(16)
             text = T.ellipsize(T.fonts["tiny"], text, max(0, room))
         self.itemconfigure(self._hint_item, text=text,
                            fill=T.WARN if text.startswith("⚠") else T.TEXT_MUTE)
@@ -90,7 +91,7 @@ class Card(tk.Canvas):
             inner_w = max(1, width - 2 * self.padx)
 
             if self._stretch:
-                height = max(self.winfo_height(), 120)
+                height = max(self.winfo_height(), T.px(120))
                 self.itemconfigure(
                     self._win, width=inner_w,
                     height=max(1, height - 2 * self.pady - self._head_h))
@@ -133,11 +134,18 @@ class Button(tk.Canvas):
         "quiet": (None, T.CARD_HI, T.BG_DEEP, T.TEXT_MUTE, None),
     }
 
+    PAD_X = 14                # air at each side of the content, at 96 dpi
+
     def __init__(self, parent, text="", command=None, kind="ghost",
                  width=150, height=38, icon="", icon_name=None, bg=T.CARD,
                  radius=None, state="normal"):
+        # width and height are designed for a 96 dpi screen (T.px). The width
+        # is only the least the button gets: it grows to fit its caption, so a
+        # larger font or display scaling can no longer cut the text off.
+        self._min_width = T.px(width)
+        self._height = T.px(height)
         super().__init__(parent, bg=bg, highlightthickness=0, bd=0,
-                         width=width, height=height)
+                         width=self._min_width, height=self._height)
         self._kind = kind
         self._command = command
         self._text = text
@@ -156,7 +164,26 @@ class Button(tk.Canvas):
         self.bind("<ButtonPress-1>", self._on_press)
         self.bind("<ButtonRelease-1>", self._on_release)
         self.bind("<Configure>", lambda _e: self._render())
+        self._fit()
         self._render()
+
+    # -- Size ------------------------------------------------------------
+    def _icon_size(self):
+        return min(T.px(20), self._height - T.px(14))
+
+    def content_width(self):
+        """Width of icon, gap and caption - the least the button has to be."""
+        font = T.fonts["button"]
+        if self._icon_name and self._icon_name in icons._RENDERERS:
+            text_w = font.measure(self._text) if self._text else 0
+            return self._icon_size() + (T.px(8) if self._text else 0) + text_w
+        label = f"{self._icon}  {self._text}".strip() if self._icon else self._text
+        return font.measure(label)
+
+    def _fit(self):
+        width = max(self._min_width, self.content_width() + 2 * T.px(self.PAD_X))
+        if int(tk.Canvas.cget(self, "width")) != width:
+            tk.Canvas.configure(self, width=width)
 
     # -- API compatible with ttk widgets --------------------------------
     def configure(self, cnf=None, **kw):
@@ -164,6 +191,8 @@ class Button(tk.Canvas):
         text = kw.pop("text", None)
         kind = kw.pop("kind", None)
         icon_name = kw.pop("icon_name", None)
+        width = kw.pop("width", None)
+        height = kw.pop("height", None)
         if state is not None:
             self._state = str(state)
             self._hover = self._pressed = False
@@ -173,8 +202,15 @@ class Button(tk.Canvas):
             self._kind = kind
         if icon_name is not None:
             self._icon_name = icon_name
+        if width is not None:
+            self._min_width = T.px(width)
+        if height is not None:
+            self._height = T.px(height)
+            kw["height"] = self._height
         result = super().configure(cnf, **kw) if (cnf or kw) else None
-        if state is not None or text is not None or kind is not None or icon_name is not None:
+        if any(value is not None for value in
+               (state, text, kind, icon_name, width, height)):
+            self._fit()
             self._render()
         return result
 
@@ -240,12 +276,12 @@ class Button(tk.Canvas):
 
         # Check for SVG icon
         if self._icon_name and self._icon_name in icons._RENDERERS:
-            icon_sz = min(20, height - 14)
+            icon_sz = self._icon_size()
             self._img_obj = icons.get_icon(self._icon_name, size=icon_sz)
             
             font = T.fonts["button"]
             text_w = font.measure(self._text) if self._text else 0
-            gap = 8 if self._text else 0
+            gap = T.px(8) if self._text else 0
             total_w = icon_sz + gap + text_w
             
             start_x = (width - total_w) / 2
@@ -263,7 +299,7 @@ class Button(tk.Canvas):
 class Switch(tk.Canvas):
     """A sliding toggle with a caption."""
 
-    TRACK_W, TRACK_H, KNOB_R = 38, 20, 7
+    TRACK_W, TRACK_H, KNOB_R = 38, 20, 7          # at 96 dpi
 
     def __init__(self, parent, text="", variable=None, command=None,
                  bg=T.CARD, width=None):
@@ -271,12 +307,15 @@ class Switch(tk.Canvas):
         self._command = command
         self._text = text
         self._hover = False
+        self._track_w, self._track_h, self._knob_r = (
+            T.px(value) for value in (self.TRACK_W, self.TRACK_H, self.KNOB_R))
 
         font = T.fonts["body"]
         text_w = font.measure(text) if text else 0
+        natural = self._track_w + T.px(10) + text_w + T.px(4)
         super().__init__(parent, bg=bg, highlightthickness=0, bd=0,
-                         width=width or (self.TRACK_W + 10 + text_w + 4),
-                         height=max(self.TRACK_H, 22))
+                         width=T.px(width) if width else natural,
+                         height=max(self._track_h, T.px(22)))
 
         self.bind("<Button-1>", self._toggle)
         self.bind("<Enter>", lambda _e: self._set_hover(True))
@@ -305,17 +344,17 @@ class Switch(tk.Canvas):
         track = T.ACCENT if on else T.BG_DEEP
         if self._hover:
             track = T.ACCENT_HI if on else T.BORDER
-        T.round_rect(self, 1, mid - self.TRACK_H / 2, self.TRACK_W,
-                     mid + self.TRACK_H / 2, self.TRACK_H / 2,
+        T.round_rect(self, 1, mid - self._track_h / 2, self._track_w,
+                     mid + self._track_h / 2, self._track_h / 2,
                      fill=track, outline=T.BORDER if not on else "", width=1)
 
-        cx = (self.TRACK_W - self.KNOB_R - 3) if on else (self.KNOB_R + 4)
-        self.create_oval(cx - self.KNOB_R, mid - self.KNOB_R,
-                         cx + self.KNOB_R, mid + self.KNOB_R,
+        knob = self._knob_r
+        cx = (self._track_w - knob - T.px(3)) if on else (knob + T.px(4))
+        self.create_oval(cx - knob, mid - knob, cx + knob, mid + knob,
                          fill="#ffffff" if on else T.TEXT_DIM, outline="")
 
         if self._text:
-            self.create_text(self.TRACK_W + 10, mid, anchor="w", text=self._text,
+            self.create_text(self._track_w + T.px(10), mid, anchor="w", text=self._text,
                              fill=T.TEXT if on else T.TEXT_DIM,
                              font=T.fonts["body"])
 
@@ -324,13 +363,15 @@ class Switch(tk.Canvas):
 class Slider(tk.Canvas):
     """A slider with track, fill and knob. Supports dragging and clicking."""
 
-    HEIGHT = 24
+    HEIGHT = 24                  # at 96 dpi
     KNOB_R = 7
 
     def __init__(self, parent, from_=-20.0, to=20.0, value=0.0, command=None,
                  width=280, bg=T.CARD, centered=True):
+        self._height = T.px(self.HEIGHT)
+        self._knob_r = T.px(self.KNOB_R)
         super().__init__(parent, bg=bg, highlightthickness=0, bd=0,
-                         width=width, height=self.HEIGHT)
+                         width=T.px(width), height=self._height)
         self.from_, self.to = from_, to
         self._value = value
         self._command = command
@@ -373,8 +414,8 @@ class Slider(tk.Canvas):
         self._render()
 
     def _x_to_value(self, x):
-        usable = max(1, self.winfo_width() - 2 * self.KNOB_R - 2)
-        share = (x - self.KNOB_R - 1) / usable
+        usable = max(1, self.winfo_width() - 2 * self._knob_r - 2)
+        share = (x - self._knob_r - 1) / usable
         return self.from_ + max(0.0, min(1.0, share)) * (self.to - self.from_)
 
     def _on_click(self, event):
@@ -399,12 +440,13 @@ class Slider(tk.Canvas):
     # -- Rendering --------------------------------------------------------
     def _render(self):
         self.delete("all")
-        width = max(self.winfo_width(), 60)
-        mid = self.HEIGHT / 2
-        x0, x1 = self.KNOB_R + 1, width - self.KNOB_R - 1
+        width = max(self.winfo_width(), T.px(60))
+        mid = self._height / 2
+        x0, x1 = self._knob_r + 1, width - self._knob_r - 1
         span = x1 - x0
+        half = T.px(2)
 
-        T.round_rect(self, x0, mid - 2, x1, mid + 2, 2,
+        T.round_rect(self, x0, mid - half, x1, mid + half, half,
                      fill=T.BG_DEEP, outline="")
 
         share = (self._value - self.from_) / float(self.to - self.from_)
@@ -413,16 +455,16 @@ class Slider(tk.Canvas):
         if self._centered:
             centre = x0 + span * (0.0 - self.from_) / float(self.to - self.from_)
             left, right = min(centre, knob_x), max(centre, knob_x)
-            self.create_line(centre, mid - 5, centre, mid + 5,
+            self.create_line(centre, mid - T.px(5), centre, mid + T.px(5),
                              fill=T.BORDER_HI, width=1)
         else:
             left, right = x0, knob_x
 
         if abs(right - left) > 1:
-            T.round_rect(self, left, mid - 2, right, mid + 2, 2,
+            T.round_rect(self, left, mid - half, right, mid + half, half,
                          fill=T.ACCENT, outline="")
 
-        radius = self.KNOB_R + (1 if self._hover or self._dragging else 0)
+        radius = self._knob_r + (1 if self._hover or self._dragging else 0)
         self.create_oval(knob_x - radius, mid - radius,
                          knob_x + radius, mid + radius,
                          fill="#ffffff" if self._hover or self._dragging else T.TEXT,
@@ -444,11 +486,16 @@ class Meter(tk.Canvas):
     READOUT_W = 66
 
     def __init__(self, parent, width=320, height=14, blocks=44, bg=T.CARD):
+        width, height = T.px(width), T.px(height)
         super().__init__(parent, bg=bg, highlightthickness=0, bd=0,
                          width=width, height=height)
         self._height = height
         self._block_count = blocks
-        self._bar_w = max(20, width - self.READOUT_W)
+        # Room for the readout: at least READOUT_W (at 96 dpi), and always what
+        # the widest reading takes in the font it is set in.
+        self._readout_w = max(T.px(self.READOUT_W),
+                              T.fonts["mono_small"].measure("-60.0 dB") + T.px(8))
+        self._bar_w = max(T.px(20), width - self._readout_w)
         self._built_for = 0
         self._blocks = []
         self._peak_item = None
@@ -474,10 +521,10 @@ class Meter(tk.Canvas):
     def _build(self, width):
         self.delete("all")
         self._built_for = width
-        self._bar_w = max(20, width - self.READOUT_W)
+        self._bar_w = max(T.px(20), width - self._readout_w)
         self._blocks = []
 
-        gap = 2
+        gap = T.px(2)
         step = self._bar_w / self._block_count
         for index in range(self._block_count):
             x0 = index * step
@@ -493,7 +540,7 @@ class Meter(tk.Canvas):
             self._blocks.append((item, x0, on, off))
 
         self._peak_item = self.create_line(0, 0, 0, self._height, fill="#ffffff",
-                                           width=2, state="hidden")
+                                           width=T.px(2), state="hidden")
         self._readout = self.create_text(width - 1, self._height / 2, anchor="e",
                                          text="  — dB", fill=T.TEXT_MUTE,
                                          font=T.fonts["mono_small"])
@@ -556,8 +603,9 @@ class StatusPill(tk.Canvas):
     """Status display: a dot plus text, optionally pulsing."""
 
     def __init__(self, parent, bg=T.BG, width=230, height=28):
+        self._min_width = T.px(width)
         super().__init__(parent, bg=bg, highlightthickness=0, bd=0,
-                         width=width, height=height)
+                         width=self._min_width, height=T.px(height))
         self._text = "ready"
         self._colour = T.TEXT_MUTE
         self._pulse = False
@@ -568,6 +616,12 @@ class StatusPill(tk.Canvas):
         self._text, self._colour, self._pulse = text, colour, pulse
         if not pulse:
             self._phase = 0.0
+        # A longer status ('processing recovered recording...') used to run off
+        # the left edge of a canvas of fixed width.
+        needed = T.fonts["small"].measure(text) + T.px(32)
+        width = max(self._min_width, needed)
+        if int(self["width"]) != width:
+            self.configure(width=width)
         self._render()
 
     def tick(self, dt=0.04):
@@ -587,23 +641,23 @@ class StatusPill(tk.Canvas):
         dot = T.mix(self["bg"], self._colour, alpha)
 
         text_w = T.fonts["small"].measure(self._text)
-        pill_w = text_w + 32
+        pill_w = text_w + T.px(32)
         x0 = max(0, width - pill_w)
 
         # Glassmorphic rounded pill background
         T.round_rect(self, x0, 1, width - 1, height - 1, (height - 2) / 2,
                      fill=T.CARD, outline=T.BORDER, width=1)
 
-        radius = 4
-        cx = x0 + 14
+        radius = T.px(4)
+        cx = x0 + T.px(14)
         self.create_oval(cx - radius, mid - radius, cx + radius, mid + radius,
                          fill=dot, outline="")
         if self._pulse:
             halo = T.mix(self["bg"], self._colour, alpha * 0.25)
-            self.create_oval(cx - radius - 4, mid - radius - 4,
-                             cx + radius + 4, mid + radius + 4,
+            self.create_oval(cx - radius - T.px(4), mid - radius - T.px(4),
+                             cx + radius + T.px(4), mid + radius + T.px(4),
                              outline=halo, width=1)
-        self.create_text(x0 + 26, mid, anchor="w", text=self._text,
+        self.create_text(x0 + T.px(26), mid, anchor="w", text=self._text,
                          fill=T.TEXT_DIM, font=T.fonts["small"])
 
 
@@ -617,14 +671,14 @@ class Transcript(tk.Frame):
             self, height=height, wrap="word", relief="flat", bd=0,
             bg=bg, fg=T.TEXT, insertbackground=T.ACCENT,
             selectbackground=T.mix(bg, T.ACCENT, 0.35), selectforeground=T.TEXT,
-            font=T.fonts["mono"], padx=2, pady=2, highlightthickness=0,
-            spacing1=2, spacing3=2, state=tk.DISABLED, cursor="arrow")
+            font=T.fonts["mono"], padx=T.px(2), pady=T.px(2), highlightthickness=0,
+            spacing1=T.px(2), spacing3=T.px(2), state=tk.DISABLED, cursor="arrow")
         self.scroll = ttk.Scrollbar(self, orient="vertical",
                                     style="Dark.Vertical.TScrollbar",
                                     command=self.text.yview)
         self.text.configure(yscrollcommand=self.scroll.set)
         self.text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.scroll.pack(side=tk.RIGHT, fill=tk.Y, padx=(6, 0))
+        self.scroll.pack(side=tk.RIGHT, fill=tk.Y, padx=(T.XS, 0))
 
         self.text.tag_configure("ts", foreground=T.TIMESTAMP)
         self.text.tag_configure("self", foreground=T.SPEAKER_SELF,
@@ -831,21 +885,102 @@ class Flow(tk.Frame):
 
 
 # ======================================================================
+class Scroller(tk.Frame):
+    """A page that scrolls where it is taller than the room it is given.
+
+    The tabs were plain frames, and pack squeezes what does not fit: where the
+    screen cannot hold the window at full height - at 150 % on a 1080p screen,
+    at 100 % on a 1366x768 laptop - the last card of the Settings tab was cut
+    off. Here the page keeps its height and a scrollbar shows while needed.
+    Build the content into .body.
+
+    While the page scrolls, the wheel scrolls it wherever the pointer is: a
+    combo box or slider that passes under the pointer on the way no longer
+    catches the wheel and changes its value - a combo box with the keyboard
+    focus still does. While everything fits, the widgets keep the wheel.
+    """
+
+    def __init__(self, parent, bg=T.BG):
+        super().__init__(parent, bg=bg)
+        self.canvas = tk.Canvas(self, bg=bg, highlightthickness=0, bd=0,
+                                width=1, height=1)
+        self.body = tk.Frame(self.canvas, bg=bg)
+        self._win = self.canvas.create_window(0, 0, anchor="nw", window=self.body)
+        self.scrollbar = ttk.Scrollbar(self, orient="vertical",
+                                       style="Dark.Vertical.TScrollbar",
+                                       command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.scrolling = False
+
+        # A bindtag of its own, put in front of those of everything on the
+        # page (_claim_wheel), so that the page sees the wheel first.
+        self._tag = f"Scroller{id(self)}"
+        sequences = ["<MouseWheel>"]
+        if self.tk.call("tk", "windowingsystem") == "x11":
+            sequences += ["<Button-4>", "<Button-5>"]       # the wheel on X11
+        for sequence in sequences:
+            self.bind_class(self._tag, sequence, self._on_wheel)
+
+        self.canvas.bind("<Configure>", self._sync)
+        self.body.bind("<Configure>", self._sync)
+
+    def _sync(self, _event=None):
+        width, room = self.canvas.winfo_width(), self.canvas.winfo_height()
+        needed = self.body.winfo_reqheight()
+        self.canvas.itemconfigure(self._win, width=width)
+        # Ask for the whole page, as the plain frame did: the window still
+        # knows what showing all of it would take.
+        self.canvas.configure(scrollregion=(0, 0, width, needed),
+                              width=self.body.winfo_reqwidth(), height=needed)
+        scrolling = 1 < room < needed
+        if scrolling != self.scrolling:
+            self.scrolling = scrolling
+            if scrolling:
+                self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y, padx=(T.XS, 0),
+                                    before=self.canvas)
+            else:
+                self.scrollbar.pack_forget()
+                self.canvas.yview_moveto(0)
+        # Every time, so that content added later is covered as well.
+        self._claim_wheel(self)
+
+    def _claim_wheel(self, widget):
+        tags = widget.bindtags()
+        if self._tag not in tags:
+            widget.bindtags((self._tag,) + tags)
+        for child in widget.winfo_children():
+            self._claim_wheel(child)
+
+    def _on_wheel(self, event):
+        if not self.scrolling:
+            return None                          # nothing to scroll
+        widget = event.widget
+        if isinstance(widget, ttk.Combobox) \
+                and str(widget) == str(self.tk.call("focus")):
+            return None                          # it is being used on purpose
+        up = event.num == 4 or event.delta > 0
+        self.canvas.yview_scroll(-1 if up else 1, "units")
+        return "break"
+
+
+# ======================================================================
 class Field(tk.Frame):
     """A labelled entry or select field with an optional icon."""
 
     def __init__(self, parent, label, widget_factory, bg=T.CARD, hint=None, icon_name=None):
         super().__init__(parent, bg=bg)
         lbl_frame = tk.Frame(self, bg=bg)
-        lbl_frame.pack(fill=tk.X, pady=(0, 4))
+        lbl_frame.pack(fill=tk.X, pady=(0, T.px(4)))
         self._icon_img = None
         if icon_name:
-            self._icon_img = icons.get_icon(icon_name, size=15)
-            tk.Label(lbl_frame, image=self._icon_img, bg=bg).pack(side=tk.LEFT, padx=(0, 5))
+            self._icon_img = icons.get_icon(icon_name, size=T.px(15))
+            tk.Label(lbl_frame, image=self._icon_img, bg=bg).pack(
+                side=tk.LEFT, padx=(0, T.px(5)))
         tk.Label(lbl_frame, text=label, bg=bg, fg=T.TEXT_DIM, font=T.fonts["small"],
                  anchor="w").pack(side=tk.LEFT, fill=tk.X)
         self.widget = widget_factory(self)
         self.widget.pack(fill=tk.X)
         if hint:
             self.hint = WrapLabel(self, text=hint, bg=bg)
-            self.hint.pack(fill=tk.X, pady=(4, 0))
+            self.hint.pack(fill=tk.X, pady=(T.px(4), 0))
