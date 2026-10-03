@@ -490,6 +490,11 @@ class TestTooLittleRoom(unittest.TestCase):
 
     def test_a_window_with_room_enough_does_not_scroll(self):
         with ShownApp() as shown:
+            # Windows keeps a window within the screen: on the 1024x768 screen
+            # of a CI runner the window gets ~780 of its 980 px, and there the
+            # Settings tab rightly scrolls.
+            if shown.root.winfo_height() < shown.size[1]:   # pragma: no cover
+                self.skipTest("the screen cannot give the window its height")
             for name in ("tab_recorder", "tab_settings"):
                 page = next(_walk(shown.show(name), "Scroller"))
                 self.assertFalse(page.scrolling, name)

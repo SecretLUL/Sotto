@@ -30,6 +30,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # The runner's screen is 1024x768, too small for the window to open at
+      # full height; the layout tests that need the room skip themselves there.
+      - name: Give the screen room for the window
+        run: |
+          try { Set-DisplayResolution -Width 1920 -Height 1080 -Force -ErrorAction Stop }
+          catch { Write-Warning "Could not change the resolution: $_" }
+          Add-Type -AssemblyName System.Windows.Forms
+          "Screen: " + [System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Size
+
       - name: Run test suite
         run: python run_tests.py
 
