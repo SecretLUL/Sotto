@@ -44,6 +44,15 @@ No Python installation or terminal setup required!
 > Mac, run from source (Option B) or build locally with `python build_release.py`,
 > which produces a `macos-x64` archive.
 
+> 📁 **Where your data lives**: `bin/` (the downloaded models, up to 3 GB each),
+> `output/` and `settings.json` sit next to the executable, so deleting that folder
+> removes them too. If the folder is not writable (e.g. `C:\Program Files`) - and
+> always on macOS - they go to the per-user folder instead:
+> `%LOCALAPPDATA%\AudioTranscriber`, `~/Library/Application Support/AudioTranscriber`
+> or `~/.local/share/AudioTranscriber`. Set `AUDIO_TRANSCRIBER_HOME` to choose the
+> folder yourself. Data that an earlier packaged build kept inside `_internal/` is
+> moved over on the first start.
+
 ---
 
 ### Option B: Running from Source (For Developers 🛠️)

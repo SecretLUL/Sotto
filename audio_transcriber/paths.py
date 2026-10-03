@@ -3,23 +3,116 @@
 Fixes M1: the previous version used os.getcwd() everywhere. Launched from a
 shortcut or a different working directory, settings.json and output/ ended up
 somewhere else and bin/ counted as "missing" -> a 3 GB model re-download.
-Every path now hangs off the script directory.
+Every path now hangs off one data directory that does not depend on the cwd.
+
+Where that directory is (resolve_data_dir):
+  * $AUDIO_TRANSCRIBER_HOME, if set - an explicit choice always wins.
+  * From source: the repository, as before.
+  * A packaged (PyInstaller) build: next to the executable, so "extract
+    anywhere and run" keeps working. __file__ is no use there - in the onedir
+    layout it points into the bundled _internal folder, which is where bin/
+    (the multi-GB models), output/ and settings.json used to end up: gone with
+    every update of the app folder, and not writable wherever the app is
+    installed read-only.
+  * If the folder next to the executable is not writable, and always on macOS
+    (writing into a .app breaks its signature, and a quarantined app is run
+    from a read-only copy): the per-user data folder.
 """
 
 import os
 import re
+import sys
 import uuid
 
-# .../Audio-Transcriber/audio_transcriber/paths.py  ->  .../Audio-Transcriber
-APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+APP_NAME = "AudioTranscriber"
 
-BIN_DIR = os.path.join(APP_DIR, "bin")
-OUT_DIR = os.path.join(APP_DIR, "output")
+# Names the data directory explicitly - portable installs, tests, CI.
+HOME_ENV = "AUDIO_TRANSCRIBER_HOME"
+
+# .../Audio-Transcriber/audio_transcriber/paths.py  ->  .../Audio-Transcriber
+# In a packaged build this is PyInstaller's _internal folder - not a place for
+# data, but where an older packaged build left some (see migrate_legacy_data).
+SOURCE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _is_writable(directory):
+    """True if a file can really be created there.
+
+    os.access() is useless on Windows: it only looks at the read-only attribute
+    and reports C:\\Program Files as writable.
+
+    Exactly one attempt, deliberately not tempfile: on Windows tempfile takes a
+    PermissionError for "that name exists" whenever os.access() claims the
+    folder is writable, and retries up to 10 000 times - in Program Files that
+    is minutes of a frozen start-up, in the one place this check exists for.
+    """
+    probe = os.path.join(directory, f".write-test-{uuid.uuid4().hex}")
+    # O_TEMPORARY (Windows) deletes the file when it is closed.
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_TEMPORARY", 0)
+    try:
+        os.close(os.open(probe, flags))
+    except OSError:
+        return False
+    try:
+        os.remove(probe)               # POSIX; on Windows it is already gone
+    except OSError:
+        pass
+    return True
+
+
+def _user_data_dir(platform, env, home):
+    if platform == "win32":
+        base = (env.get("LOCALAPPDATA") or env.get("APPDATA")
+                or os.path.join(home, "AppData", "Local"))
+    elif platform == "darwin":
+        base = os.path.join(home, "Library", "Application Support")
+    else:
+        base = env.get("XDG_DATA_HOME") or os.path.join(home, ".local", "share")
+    return os.path.join(base, APP_NAME)
+
+
+def resolve_data_dir(source_dir=None, frozen=None, executable=None,
+                     platform=None, env=None, home=None, writable=None):
+    """Where settings.json, bin/ and output/ live (see the module docstring).
+
+    The arguments exist so the decision can be tested for every platform; the
+    defaults describe this process. They are looked up at call time, not bound
+    when the module is imported.
+    """
+    source_dir = SOURCE_DIR if source_dir is None else source_dir
+    frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
+    executable = sys.executable if executable is None else executable
+    platform = sys.platform if platform is None else platform
+    env = os.environ if env is None else env
+    home = os.path.expanduser("~") if home is None else home
+    writable = _is_writable if writable is None else writable
+
+    override = (env.get(HOME_ENV) or "").strip()
+    if override:
+        return os.path.abspath(os.path.expanduser(override))
+    if not frozen:
+        return source_dir
+
+    if platform != "darwin":
+        beside_executable = os.path.dirname(os.path.abspath(executable))
+        if writable(beside_executable):
+            return beside_executable
+    return _user_data_dir(platform, env, home)
+
+
+DATA_DIR = resolve_data_dir()
+APP_DIR = DATA_DIR            # what this module called it before packaged builds
+
+BIN_DIR = os.path.join(DATA_DIR, "bin")
+OUT_DIR = os.path.join(DATA_DIR, "output")
 TMP_DIR = os.path.join(OUT_DIR, ".tmp")
-CFG_PATH = os.path.join(APP_DIR, "settings.json")
-LOG_PATH = os.path.join(APP_DIR, "recorder.log")
+CFG_PATH = os.path.join(DATA_DIR, "settings.json")
+LOG_PATH = os.path.join(DATA_DIR, "recorder.log")
 
 WHISPER_EXE = os.path.join(BIN_DIR, "whisper-cli.exe")
+
+# What a packaged build used to keep inside PyInstaller's _internal folder.
+LEGACY_ITEMS = ("settings.json", "bin", "output")
 
 # Everything a single run writes into the output directory under its base name.
 # Both files are overwritten without asking unless the caller checks first.
@@ -40,7 +133,8 @@ _STRIPPED_EXTENSIONS = frozenset({
 # Names Microsoft documents as devices, with or without an extension ('NUL.txt'
 # is equivalent to NUL). Whether a given Windows build still honours that
 # differs - 11 build 26200 writes an ordinary file - so this is a precaution
-# for the builds that do.
+# for the builds that do. COM and LPT come with 1-9 and with the superscript
+# digits (the last three characters below), which Windows reserves as well.
 _RESERVED_NAMES = frozenset(
     {"CON", "PRN", "AUX", "NUL"}
     | {f"{device}{digit}" for device in ("COM", "LPT")
@@ -51,6 +145,56 @@ def ensure_dirs():
     """Create the working directories (idempotent)."""
     for directory in (BIN_DIR, OUT_DIR, TMP_DIR):
         os.makedirs(directory, exist_ok=True)
+
+
+def migrate_legacy_data(source_dir=None, data_dir=None, frozen=None):
+    """Move what an older packaged build left in _internal to the data directory.
+
+    Those builds kept bin/ (the multi-GB models), output/ and settings.json
+    inside PyInstaller's _internal folder. A version that looks next to the
+    executable instead would make all of it look lost - including a 3 GB model
+    that would be downloaded again - so it is moved over, once, before anything
+    reads or creates files there.
+
+    Moving is a rename: instant even for the models, and it cannot leave a
+    half-copied model behind. Where a rename is not possible (another drive)
+    the data simply stays where it is. Nothing is ever overwritten; an empty
+    placeholder directory is replaced. Does nothing outside a packaged build.
+
+    Returns the names that were moved.
+    """
+    source_dir = SOURCE_DIR if source_dir is None else source_dir
+    data_dir = DATA_DIR if data_dir is None else data_dir
+    frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
+    if not frozen or _same_directory(source_dir, data_dir):
+        return []
+
+    moved = []
+    for name in LEGACY_ITEMS:
+        old = os.path.join(source_dir, name)
+        new = os.path.join(data_dir, name)
+        if not os.path.exists(old):
+            continue
+        try:
+            if os.path.exists(new):
+                if not _is_empty_dir(new):
+                    continue
+                os.rmdir(new)
+            os.makedirs(data_dir, exist_ok=True)
+            os.rename(old, new)
+        except OSError:
+            continue
+        moved.append(name)
+    return moved
+
+
+def _same_directory(first, second):
+    return (os.path.normcase(os.path.realpath(first))
+            == os.path.normcase(os.path.realpath(second)))
+
+
+def _is_empty_dir(path):
+    return os.path.isdir(path) and not os.listdir(path)
 
 
 def model_path(model_name):

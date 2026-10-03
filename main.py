@@ -24,6 +24,7 @@ def main():
 
     try:
         import tkinter as tk
+        from audio_transcriber import paths
         from audio_transcriber.ui.app import RecorderApp
     except ImportError as exc:
 
@@ -33,6 +34,9 @@ def main():
         return 1
 
     try:
+        # Before anything reads settings.json or creates bin/ and output/: a
+        # packaged build older than this one kept them inside _internal.
+        paths.migrate_legacy_data()
         root = tk.Tk()
         RecorderApp(root)
         root.mainloop()
