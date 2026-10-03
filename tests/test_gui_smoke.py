@@ -162,5 +162,72 @@ class TestAppLifecycle(unittest.TestCase):
                 self.assertTrue(joined.replace("\\", "/").startswith("/base/"))
 
 
+@unittest.skipUnless(_can_open_window(), "no graphical display available")
+class TestOutputConflictDialog(unittest.TestCase):
+    """The overwrite warning shown before an existing recording is replaced."""
+
+    def setUp(self):
+        from audio_transcriber.ui import icons
+        icons._ICON_CACHE.clear()          # PhotoImages belong to their own root
+        self.out_dir = tempfile.mkdtemp()
+        for name in ("my_meeting.wav", "my_meeting.txt", "taken.wav"):
+            with open(os.path.join(self.out_dir, name), "w", encoding="utf-8") as handle:
+                handle.write("x")
+
+        from audio_transcriber.ui import theme
+        self.root = tk.Tk()
+        self.root.withdraw()
+        theme.apply(self.root)
+
+    def tearDown(self):
+        import shutil
+        from audio_transcriber.ui import icons
+        self.root.destroy()
+        icons._ICON_CACHE.clear()
+        shutil.rmtree(self.out_dir, ignore_errors=True)
+
+    def _open(self, base_name="my_meeting"):
+        from audio_transcriber.ui.dialogs import OutputConflictDialog
+        return OutputConflictDialog(self.root, self.out_dir, base_name)
+
+    def test_overwrite_keeps_the_original_name(self):
+        dialog = self._open()
+        dialog.overwrite_btn.invoke()
+        self.assertEqual(dialog.result, "my_meeting")
+
+    def test_numbering_picks_the_next_free_name(self):
+        dialog = self._open()
+        self.assertEqual(dialog.suggestion, "my_meeting_2")
+        dialog.number_btn.invoke()
+        self.assertEqual(dialog.result, "my_meeting_2")
+
+    def test_renaming_accepts_a_free_name(self):
+        dialog = self._open()
+        dialog.entry.delete(0, tk.END)
+        dialog.entry.insert(0, "second try.wav")
+        dialog.rename_btn.invoke()
+        # Sanitised the same way as the main window's file name field
+        self.assertEqual(dialog.result, "second try")
+
+    def test_renaming_onto_another_existing_file_stays_open(self):
+        dialog = self._open()
+        dialog.entry.delete(0, tk.END)
+        dialog.entry.insert(0, "taken")
+        dialog.rename_btn.invoke()
+        try:
+            self.assertIsNone(dialog.result)
+            self.assertTrue(dialog.winfo_exists())
+            # The warning now talks about the new collision
+            self.assertIn("taken.wav", dialog.message.cget("text"))
+            self.assertEqual(dialog.suggestion, "taken_2")
+        finally:
+            dialog._cancel()
+
+    def test_cancelling_returns_nothing(self):
+        dialog = self._open()
+        dialog.cancel_btn.invoke()
+        self.assertIsNone(dialog.result)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -83,7 +83,7 @@ No Python installation or terminal setup required!
 - 🗣️ **Smart Speaker Diarization**: Exact speaker tagging (`[You]` vs `[Participant]`) via track-relative level comparison.
 - 🤖 **Offline Local AI**: Integrated `whisper.cpp` engine with automatic GGML model downloads (Tiny to Large-v3).
 - ☁️ **Cloud API Acceleration**: Optional ElevenLabs Scribe v2 integration with token-level timestamp alignment.
-- ⚡ **Real-Time Live Preview**: Streaming live transcription while recording without cutting off closing audio.
+- ⚡ **Live Transcription**: Recognises the recording in silence-aligned chunks while it runs, so pressing stop only has to catch up with the last seconds. Includes an optional live preview to read along.
 - 🎛️ **DAW-Grade VUMeters**: Custom hand-drawn peak/RMS meters with dynamic dB readouts and gain sliders (-20 dB to +20 dB).
 - 🔒 **Encrypted Secret Storage**: ElevenLabs API keys are encrypted via Windows DPAPI or secure user-scoped storage.
 - 🎨 **Modern Dark Interface**: Custom Tkinter `Canvas` design system with zero external UI framework dependencies.
@@ -107,7 +107,7 @@ Audio-Transcriber/
  │    ├── secretstore.py         DPAPI Windows key encryption
  │    ├── events.py              Thread-safe UI event bridge & pump
  │    ├── diarize.py             Speaker merging, bleed & hallucination filter
- │    ├── pipeline.py            Post-processing workflow & live preview engine
+ │    ├── pipeline.py            Live transcription, closing pass & preview engine
  │    ├── audio/                 Audio processing module
  │    │    ├── devices.py        WASAPI / PulseAudio enumeration & loopback matching
  │    │    ├── capture.py        Multi-device audio capture & disk streaming
@@ -144,7 +144,8 @@ Instead of downmixing audio upfront and estimating speakers probabilistically, b
   - **Transcription Engine**: Model selection (Tiny to Large-v3), Language choice (Auto-detect + 100+ languages), and ElevenLabs API key.
   - **Output Directory**: Target folder selector for `.wav` audio files and `.txt` transcripts with **Browse...** and **Reset** buttons.
   - **Processing Switches**:
-    - ⚡ **Live preview**: Real-time streaming transcription during active recording.
+    - ⚡ **Live transcription**: Recognises the recording in chunks while it runs, so stopping only has to catch up with the tail instead of working through the whole session. Local models only — the cloud backend still transcribes after you stop. On by default.
+    - 👀 **Live preview**: Shows the running text in the Transcript tab while recording.
     - 🎛️ **Separate tracks**: Dual-channel capture mode (Microphone + System Audio).
     - 🎙️ **VAD**: Voice Activity Detection pre-filtering (Silero VAD).
     - 💾 **Keep raw tracks**: Preserves unmixed separate microphone and system audio `.wav` files for post-processing in DAWs/NLEs (e.g. Audacity, Premiere Pro).

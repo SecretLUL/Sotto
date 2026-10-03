@@ -27,7 +27,7 @@ from ..audio import devices as devmod
 from ..audio.capture import AudioEngine
 from ..events import (Failed, Finished, LivePreview, Log, Progress, Status,
                       UiBridge)
-from . import icons
+from . import dialogs, icons
 from . import theme as T
 from . import widgets as W
 
@@ -54,6 +54,7 @@ class RecorderApp:
         self.bridge = UiBridge(root)
         self.devices = []
         self.finalizer = None
+        self.live = None
         self.live_preview = None
         self.recording_base_name = None
         self.recording_started_at = None
@@ -298,18 +299,29 @@ class RecorderApp:
         options.grid(row=0, column=0, sticky="ew")
 
         self.live_var = tk.BooleanVar(value=self.settings.live_transcribe)
+        self.preview_var = tk.BooleanVar(value=self.settings.live_preview)
         self.separate_var = tk.BooleanVar(value=self.settings.separate_tracks)
         self.vad_var = tk.BooleanVar(value=self.settings.use_vad)
         self.keep_raw_var = tk.BooleanVar(value=self.settings.keep_raw_tracks)
 
-        W.Switch(options, "Live preview", self.live_var).grid(
+        W.Switch(options, "Live transcription", self.live_var).grid(
             row=0, column=0, sticky="w")
-        W.Switch(options, "Separate tracks", self.separate_var).grid(
+        W.Switch(options, "Live preview", self.preview_var).grid(
             row=0, column=1, sticky="w", padx=(T.MD, 0))
-        W.Switch(options, "VAD", self.vad_var).grid(
+        W.Switch(options, "Separate tracks", self.separate_var).grid(
             row=0, column=2, sticky="w", padx=(T.MD, 0))
-        W.Switch(options, "Keep raw tracks", self.keep_raw_var).grid(
+        W.Switch(options, "VAD", self.vad_var).grid(
             row=0, column=3, sticky="w", padx=(T.MD, 0))
+        W.Switch(options, "Keep raw tracks", self.keep_raw_var).grid(
+            row=1, column=0, sticky="w", pady=(T.SM, 0))
+
+        tk.Label(options,
+                 text="Live transcription recognises the recording while it "
+                      "runs, so stopping only has to catch up with the last "
+                      "few seconds. Local models only.",
+                 bg=T.CARD, fg=T.TEXT_MUTE, font=T.fonts["tiny"],
+                 anchor="w", justify="left").grid(
+            row=2, column=0, columnspan=4, sticky="w", pady=(T.SM, 0))
 
         self.save_settings_btn = W.Button(options, text="Save settings",
                                           kind="ghost", width=150, height=32,
@@ -390,10 +402,8 @@ class RecorderApp:
         self.bridge.on(Failed, self._on_failed)
 
     def _on_live_preview(self, event):
-        self.transcript.set_transcript(
-            event.text,
-            header="⚡ Live preview of the last 30 seconds — "
-                   "the final transcript is produced when you stop.")
+        self.transcript.set_transcript(event.text, header=event.header,
+                                       scroll_to_end=True)
 
     def _on_finished(self, event):
         self.transcript.set_transcript(event.text)
@@ -530,13 +540,23 @@ class RecorderApp:
 
     def _begin_recording(self):
         self._sync_settings_from_ui()
-        base_name = paths.safe_output_name(self.filename_entry.get())
-        self.filename_entry.delete(0, tk.END)
-        self.filename_entry.insert(0, base_name)
+        base_name = self._resolve_output_conflict(
+            paths.safe_output_name(self.filename_entry.get()))
+        if base_name is None:                       # the user cancelled
+            self.start_btn.config(state="normal")
+            self.status.set("ready", T.TEXT_MUTE)
+            return
+        self._apply_base_name(base_name)
+
+        # Attach live transcription BEFORE the first block is written: its
+        # sample positions are positions in the raw file, and a late start
+        # would shift the whole live half of the transcript.
+        notes = self._start_live(base_name)
 
         try:
             self.engine.start_recording(base_name)
         except RuntimeError as exc:
+            self._stop_live()
             self.start_btn.config(state="normal")
             self.status.set("ready", T.TEXT_MUTE)
             messagebox.showerror("Cannot record", str(exc))
@@ -552,11 +572,49 @@ class RecorderApp:
         self.status.set("recording", T.REC, pulse=True)
         self.transcript.clear()
         self.transcript.append("Recording started.\n")
+        for note in notes:
+            self.transcript.append(note)
 
-        if self.live_var.get():
+    def _start_live(self, base_name):
+        """Live transcription if the backend allows it, otherwise the preview.
+
+        Never both: they would run two whisper processes against each other on
+        the same cores, and the preview has nothing to add once the real
+        transcription is already running along.
+
+        Returns the lines to show once the transcript pane has been cleared -
+        this runs before the recording starts, so it must not write there yet.
+        """
+        wants_live = bool(self.live_var.get())
+        wants_preview = bool(self.preview_var.get())
+
+        if wants_live and pipeline.live_transcription_possible(self.settings):
+            self.live = pipeline.LiveTranscriber(self.bridge, self.settings,
+                                                 self.engine,
+                                                 preview=wants_preview)
+            self.live.start(base_name)
+            return [f"Live transcription running with "
+                    f"{self.settings.model_name()} - stopping only has to "
+                    f"catch up with the tail.\n"]
+
+        notes = []
+        if wants_live:
+            notes.append("⚠ Live transcription needs a local model; "
+                         "ElevenLabs transcribes after you stop.\n")
+        if wants_preview:
             self.live_preview = pipeline.LivePreview(self.bridge, self.settings,
                                                      self.engine)
             self.live_preview.start()
+        return notes
+
+    def _stop_live(self):
+        """Tear both live paths down without keeping their results."""
+        if self.live is not None:
+            self.live.cancel()
+            self.live = None
+        if self.live_preview is not None:
+            self.live_preview.stop()
+            self.live_preview = None
 
     def stop_recording(self):
         self.stop_btn.config(state="disabled")
@@ -569,12 +627,20 @@ class RecorderApp:
             self.live_preview = None
 
         recording = self.engine.stop_recording()
+        # Stop buffering right away; the finalizer waits for the chunk that is
+        # still in flight, off the GUI thread.
+        live, self.live = self.live, None
+        if live is not None:
+            live.close()
+
         if not recording.has_audio:
+            if live is not None:
+                live.cancel()
             messagebox.showwarning("No data", "No audio data was captured.")
             self._reset_controls()
             return
 
-        self.finalizer = pipeline.Finalizer(self.bridge, self.settings)
+        self.finalizer = pipeline.Finalizer(self.bridge, self.settings, live=live)
         self.finalizer.run_async(recording, self.recording_base_name)
 
     def upload_and_transcribe(self):
@@ -598,7 +664,11 @@ class RecorderApp:
 
         self._sync_settings_from_ui()
         file_basename = os.path.splitext(os.path.basename(file_path))[0]
-        base_name = paths.safe_output_name(self.filename_entry.get() or file_basename)
+        base_name = self._resolve_output_conflict(
+            paths.safe_output_name(self.filename_entry.get() or file_basename))
+        if base_name is None:                       # the user cancelled
+            return
+        self._apply_base_name(base_name)
 
         self.start_btn.config(state="disabled")
         self.upload_btn.config(state="disabled")
@@ -611,6 +681,26 @@ class RecorderApp:
 
         self.finalizer = pipeline.FileFinalizer(self.bridge, self.settings)
         self.finalizer.run_async(file_path, base_name)
+
+    # ------------------------------------------------------------------
+    def _resolve_output_conflict(self, base_name):
+        """Ask before an existing recording is silently replaced.
+
+        Both output files are written as '<base_name>.wav' / '.txt', so a
+        second run under the same name used to overwrite the first one without
+        a word. Returns the base name to write to - possibly numbered or
+        renamed - or None when the user cancelled.
+        """
+        out_dir = self.settings.get_output_dir()
+        if not paths.existing_outputs(out_dir, base_name):
+            return base_name
+        return dialogs.ask_output_conflict(self.root, out_dir, base_name)
+
+    def _apply_base_name(self, base_name):
+        """Show the name that is actually going to be written on disk."""
+        self.filename_entry.delete(0, tk.END)
+        self.filename_entry.insert(0, base_name)
+        self.settings.filename = base_name
 
     def _reset_controls(self):
         self.start_btn.config(state="normal")
@@ -637,6 +727,7 @@ class RecorderApp:
         settings.language = config.LANGUAGE_CHOICES[max(0, self.lang_combo.current())][1]
         settings.api_key = self.api_entry.get().strip()
         settings.live_transcribe = bool(self.live_var.get())
+        settings.live_preview = bool(self.preview_var.get())
         settings.separate_tracks = bool(self.separate_var.get())
         settings.use_vad = bool(self.vad_var.get())
         settings.keep_raw_tracks = bool(self.keep_raw_var.get())
@@ -752,6 +843,8 @@ class RecorderApp:
 
         if self.live_preview is not None:
             self.live_preview.stop()
+        if self.live is not None:
+            self.live.cancel()
         if self.finalizer is not None:
             self.finalizer.cancel()
 

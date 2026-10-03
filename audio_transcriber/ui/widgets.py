@@ -636,13 +636,17 @@ class Transcript(tk.Frame):
             self.text.see(tk.END)
         self._edit(action)
 
-    def set_transcript(self, body, header=None):
+    def set_transcript(self, body, header=None, scroll_to_end=False):
         def action():
             self.text.delete("1.0", tk.END)
             if header:
                 self.text.insert(tk.END, header + "\n\n", "head")
             for line in body.splitlines():
                 self._insert_line(line + "\n", None)
+            # A growing live transcript should follow the newest line; a
+            # finished one starts at the top.
+            if scroll_to_end:
+                self.text.see(tk.END)
         self._edit(action)
 
     def replace_last_line(self, message):
