@@ -43,6 +43,7 @@ class Card(tk.Canvas):
         self.body = tk.Frame(self, bg=fill)
         self._win = self.create_window(self.padx, self.pady + self._head_h,
                                        anchor="nw", window=self.body)
+        self._title_end = self.padx
         if title:
             x_off = self.padx
             if icon_name:
@@ -52,17 +53,33 @@ class Card(tk.Canvas):
             self._title_item = self.create_text(
                 x_off, self.pady - 1, anchor="nw", text=title.upper(),
                 fill=T.TEXT_DIM, font=T.fonts["section"])
-        if hint:
-            self._hint_item = self.create_text(
-                0, self.pady - 1, anchor="ne", text=hint,
-                fill=T.TEXT_MUTE, font=T.fonts["tiny"])
+            self._title_end = x_off + T.fonts["section"].measure(title.upper())
+
+        # The line at the right of the heading. Always there: set_hint() used to
+        # do nothing on a card made without one, and the Sources card - whose
+        # hint says which output the system audio is taken from - was made
+        # without.
+        self._hint_text = hint or ""
+        self._hint_item = self.create_text(
+            0, self.pady - 1, anchor="ne", text=self._hint_text,
+            fill=T.TEXT_MUTE, font=T.fonts["tiny"])
 
         self.bind("<Configure>", self._sync)
         self.body.bind("<Configure>", self._sync)
 
     def set_hint(self, text):
-        if hasattr(self, "_hint_item"):
-            self.itemconfigure(self._hint_item, text=text)
+        self._hint_text = text or ""
+        self._fit_hint(self.winfo_width())
+
+    def _fit_hint(self, width):
+        """Show the hint at the right edge, cut short before it reaches the heading."""
+        text = self._hint_text
+        if width > 1:
+            room = width - self.padx - self._title_end - 16
+            text = T.ellipsize(T.fonts["tiny"], text, max(0, room))
+        self.itemconfigure(self._hint_item, text=text,
+                           fill=T.WARN if text.startswith("⚠") else T.TEXT_MUTE)
+        self.coords(self._hint_item, max(width, 1) - self.padx, self.pady - 1)
 
     def _sync(self, _event=None):
         if self._syncing:
@@ -87,8 +104,7 @@ class Card(tk.Canvas):
                     self.configure(height=height)
                 self.itemconfigure(self._win, width=inner_w)
 
-            if hasattr(self, "_hint_item"):
-                self.coords(self._hint_item, width - self.padx, self.pady - 1)
+            self._fit_hint(width)
             self._draw(width, height)
         finally:
             self._syncing = False

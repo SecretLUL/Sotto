@@ -279,6 +279,89 @@ class TestWrapLabel(unittest.TestCase):
         self.assertGreaterEqual(label.winfo_height() + 1, label.winfo_reqheight())
 
 
+@unittest.skipUnless(HAVE_DISPLAY, "no graphical display available")
+class TestCardHint(unittest.TestCase):
+    """The line at the right of a card's heading.
+
+    set_hint() did nothing on a card that was made without a hint - the Sources
+    card among them, whose hint says which output the system audio is taken
+    from and, since the stricter matching, why it could not find one. It was
+    never visible.
+    """
+
+    def setUp(self):
+        from audio_transcriber.ui import theme
+        self.root = tk.Tk()
+        self.root.withdraw()
+        theme.apply(self.root)
+        self.addCleanup(self.root.destroy)
+
+    def _card(self, width=None, **kw):
+        from audio_transcriber.ui import widgets as W
+        card = W.Card(self.root, title="Sources", **kw)
+        card.pack(fill=tk.X)
+        if width:
+            self.root.geometry(f"{width}x200+0+0")
+            try:
+                self.root.attributes("-alpha", 0.0)
+            except tk.TclError:                      # pragma: no cover
+                pass
+            self.root.deiconify()
+            pump(self.root)
+        return card
+
+    @staticmethod
+    def _text(card):
+        return card.itemcget(card._hint_item, "text")
+
+    def test_a_card_made_without_a_hint_can_still_be_given_one(self):
+        card = self._card()
+        card.set_hint("System audio captured from: Speakers")
+        self.assertEqual(self._text(card), "System audio captured from: Speakers")
+
+    def test_a_hint_given_at_the_start_is_shown(self):
+        self.assertEqual(self._text(self._card(hint="start hint")), "start hint")
+
+    def test_the_hint_can_be_cleared(self):
+        card = self._card(hint="x")
+        card.set_hint("")
+        self.assertEqual(self._text(card), "")
+
+    def test_a_long_hint_is_cut_short_rather_than_running_over_the_heading(self):
+        card = self._card(width=500)
+        card.set_hint("System audio captured from: " + "a very long device name " * 8)
+        pump(self.root)
+        shown = self._text(card)
+        self.assertTrue(shown.endswith("…"), shown)
+        left, _top, right, _bottom = card.bbox(card._hint_item)
+        title_right = card.bbox(card._title_item)[2]
+        self.assertGreater(left, title_right, "it must not reach into the heading")
+        self.assertLessEqual(right, card.winfo_width() - card.padx + 1)
+
+    def test_a_hint_that_fits_is_shown_whole(self):
+        card = self._card(width=700)
+        card.set_hint("short")
+        pump(self.root)
+        self.assertEqual(self._text(card), "short")
+
+    def test_warnings_are_amber_and_the_rest_is_muted(self):
+        from audio_transcriber.ui import theme as T
+        card = self._card()
+        card.set_hint("⚠ no loopback device")
+        self.assertEqual(card.itemcget(card._hint_item, "fill"), T.WARN)
+        card.set_hint("System audio captured from: Speakers")
+        self.assertEqual(card.itemcget(card._hint_item, "fill"), T.TEXT_MUTE)
+
+
+@unittest.skipUnless(HAVE_DISPLAY, "no graphical display available")
+class TestSourcesCardHint(unittest.TestCase):
+    def test_the_sources_card_of_the_window_says_where_the_system_audio_comes_from(self):
+        with ShownApp() as shown:
+            card = shown.app.sources_card
+            text = card.itemcget(card._hint_item, "text")
+            self.assertTrue(text.startswith(("System audio captured from:", "⚠")), text)
+
+
 def _walk(widget, class_name):
     for child in widget.winfo_children():
         if type(child).__name__ == class_name:

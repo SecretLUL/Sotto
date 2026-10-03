@@ -216,6 +216,20 @@ def round_rect(canvas, x0, y0, x1, y1, radius, **kwargs):
     return canvas.create_polygon(points, smooth=True, **kwargs)
 
 
+def ellipsize(font, text, max_width):
+    """`text` cut short with an ellipsis so that it fits max_width pixels in `font`."""
+    if font.measure(text) <= max_width:
+        return text
+    low, high = 0, len(text)
+    while low < high:                      # the longest prefix that still fits
+        middle = (low + high + 1) // 2
+        if font.measure(text[:middle].rstrip() + "…") <= max_width:
+            low = middle
+        else:
+            high = middle - 1
+    return text[:low].rstrip() + "…"
+
+
 def mix(color_a, color_b, t):
     """Linear blend of two #rrggbb colours (t = 0 -> a, 1 -> b)."""
     a = tuple(int(color_a[i:i + 2], 16) for i in (1, 3, 5))

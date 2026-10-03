@@ -71,3 +71,40 @@ class TestRoundRectGeometry(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestEllipsize(unittest.TestCase):
+    class Font:
+        """Every character is ten pixels wide."""
+
+        @staticmethod
+        def measure(text):
+            return 10 * len(text)
+
+    def test_text_that_fits_is_left_alone(self):
+        self.assertEqual(theme.ellipsize(self.Font, "hello", 50), "hello")
+        self.assertEqual(theme.ellipsize(self.Font, "hello", 500), "hello")
+
+    def test_text_that_does_not_fit_is_cut_with_an_ellipsis_and_then_fits(self):
+        shown = theme.ellipsize(self.Font, "hello world", 80)
+        self.assertEqual(shown, "hello w…")
+        self.assertLessEqual(self.Font.measure(shown), 80)
+
+    def test_the_longest_prefix_that_fits_is_kept(self):
+        for room in range(10, 200, 7):
+            shown = theme.ellipsize(self.Font, "abcdefghijklmnopqrstuvwxyz", room)
+            self.assertLessEqual(self.Font.measure(shown), max(room, 10), room)
+            longer = "abcdefghijklmnopqrstuvwxyz"[:len(shown)] + "…"
+            if shown.endswith("…") and len(shown) < 26:
+                self.assertGreater(self.Font.measure(longer), room - 0,
+                                   f"one more letter would still have fitted at {room}")
+
+    def test_no_dangling_space_before_the_ellipsis(self):
+        self.assertEqual(theme.ellipsize(self.Font, "ab cd ef", 40), "ab…")
+
+    def test_when_not_even_one_letter_fits_only_the_ellipsis_is_left(self):
+        self.assertEqual(theme.ellipsize(self.Font, "hello", 5), "…")
+        self.assertEqual(theme.ellipsize(self.Font, "hello", 0), "…")
+
+    def test_empty_text_stays_empty(self):
+        self.assertEqual(theme.ellipsize(self.Font, "", 0), "")
