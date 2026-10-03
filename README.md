@@ -59,7 +59,9 @@ python run_tests.py               # test suite
 python build_release.py v1.2.0    # standalone build and archive in dist/
 ```
 
-The code lives in `audio_transcriber/`: `audio/` captures and loads audio, `transcribe/` runs whisper.cpp and ElevenLabs, `diarize.py` merges the tracks and `ui/` is the Tkinter interface. Pushing a `v*` tag builds the release for all three platforms and publishes it.
+The code lives in `audio_transcriber/`: `audio/` captures and loads audio, `transcribe/` runs whisper.cpp and ElevenLabs, `diarize.py` merges the tracks and `ui/` is the Tkinter interface.
+
+To release, run the [Release workflow](https://github.com/SecretLUL/Sotto/actions/workflows/release.yml) from `main` and pick `patch`, `minor` or `major`. It counts on from the newest tag, builds all three platforms, then tags and publishes them with checksums. The rehearsal option builds without publishing.
 
 ## License
 
