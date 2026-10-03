@@ -397,6 +397,62 @@ class Finalizer(_Worker):
 
 
 # ----------------------------------------------------------------------
+class ModelPrefetch:
+    """Fetches what the closing pass needs while the recording is running.
+
+    A model that is not on the computer yet was downloaded after the meeting:
+    with large-v3 that is 3 GB of waiting at the moment the transcript is
+    wanted, while the recording itself takes long enough to do it in the
+    meantime. The closing pass finds the files in place - or, if the download is
+    still going when it starts, waits on the same download (binaries.py locks
+    per file) instead of starting another.
+
+    A failure here is only a note: the closing pass tries again and reports a
+    real failure where it matters.
+    """
+
+    def __init__(self, bridge, settings, backend_factory=None):
+        self.bridge = bridge
+        self.settings = settings
+        self.backend_factory = backend_factory or (lambda s: build_backend(s))
+        self._backend = None
+        self._cancelled = threading.Event()
+        self._thread = None
+
+    def start(self):
+        """Begin in the background. Returns the thread, None if nothing is to fetch."""
+        if self.settings.uses_cloud():
+            return None
+        self._thread = threading.Thread(target=self._run, name="model-prefetch",
+                                        daemon=True)
+        self._thread.start()
+        return self._thread
+
+    def cancel(self):
+        self._cancelled.set()
+        backend = self._backend
+        if backend is not None:
+            try:
+                backend.cancel()
+            except Exception:
+                pass
+
+    def _run(self):
+        try:
+            self._backend = self.backend_factory(self.settings)
+            prepare = getattr(self._backend, "prepare", None)
+            if prepare is None or self._cancelled.is_set():
+                return
+            prepare(progress=lambda message: self.bridge.post(Progress(message)),
+                    log=lambda message: self.bridge.post(Log(message)))
+        except Exception as exc:
+            if not self._cancelled.is_set():
+                self.bridge.post(Log(
+                    f"Note: the model could not be fetched in the background "
+                    f"({exc}); it is tried again when the recording ends.\n"))
+
+
+# ----------------------------------------------------------------------
 class LiveTranscriber:
     """Recognises the running recording chunk by chunk.
 

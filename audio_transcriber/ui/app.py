@@ -22,7 +22,7 @@ try:
 except ImportError:
     import pyaudio
 
-from .. import config, paths, pipeline
+from .. import config, paths, pipeline, preflight
 from ..audio import capture
 from ..audio import devices as devmod
 from ..audio.capture import AudioEngine
@@ -70,6 +70,7 @@ class RecorderApp:
         self.recording_base_name = None
         self.recording_started_at = None
         self._run_settings = None        # the copy of the settings a run works on
+        self._prefetch = None            # fetches the model while recording
         self._work_thread = None         # the finalizer thread of the current run
         self._processing_base = None     # raw-track name of a recovered recording
         self._unfinished = []            # what find_unfinished() saw last
@@ -590,6 +591,17 @@ class RecorderApp:
 
     def _begin_recording(self):
         self._sync_settings_from_ui()
+        # The run gets its own copy: the sliders and 'Save settings' go on
+        # changing self.settings while it is under way, and the live chunks and
+        # the closing pass must be recognised with one and the same model and
+        # language.
+        self._run_settings = self.settings.snapshot()
+
+        go, heads_up = self._preflight(self._run_settings, recording=True)
+        if not go:
+            self._allow_new_work()
+            return
+
         base_name = self._resolve_output_conflict(
             paths.safe_output_name(self.filename_entry.get()),
             paths.output_extensions(self.settings.keep_raw_tracks))
@@ -597,12 +609,6 @@ class RecorderApp:
             self._allow_new_work()
             return
         self._apply_base_name(base_name)
-
-        # The run gets its own copy: the sliders and 'Save settings' go on
-        # changing self.settings while it is under way, and the live chunks and
-        # the closing pass must be recognised with one and the same model and
-        # language.
-        self._run_settings = self.settings.snapshot()
 
         # Attach live transcription BEFORE the first block is written: its
         # sample positions are positions in the raw file, and a late start
@@ -629,6 +635,36 @@ class RecorderApp:
         self.transcript.append("Recording started.\n")
         for note in notes:
             self.transcript.append(note)
+        self._show_heads_up(heads_up)
+
+        # Only now that the recording really runs: fetch the model the closing
+        # pass needs, if it is not here yet, instead of after the meeting.
+        self._prefetch = pipeline.ModelPrefetch(self.bridge, self._run_settings)
+        self._prefetch.start()
+
+    def _preflight(self, run, recording):
+        """Look for trouble before anything is started.
+
+        Returns (go, notes). Errors are shown and mean no - the run would fail
+        after the recording, or never get going. Warnings are asked about.
+        Notes are only things worth knowing and come back to be written to the
+        log once it has been cleared for the run.
+        """
+        findings = preflight.check(run, recording=recording)
+        errors = [f.text for f in findings if f.level == preflight.ERROR]
+        if errors:
+            messagebox.showerror("Cannot start", "\n\n".join(errors))
+            return False, []
+        warnings = [f.text for f in findings if f.level == preflight.WARNING]
+        if warnings and not messagebox.askokcancel(
+                "Before you start", "\n\n".join(warnings) + "\n\nStart anyway?",
+                icon="warning"):
+            return False, []
+        return True, [f.text for f in findings if f.level == preflight.NOTE]
+
+    def _show_heads_up(self, notes):
+        for note in notes:
+            self.transcript.append(f"ℹ {note}\n")
 
     def _start_live(self, base_name):
         """Live transcription if the backend allows it, otherwise the preview.
@@ -716,6 +752,13 @@ class RecorderApp:
         if self.engine.is_recording or str(self.upload_btn["state"]) == "disabled":
             return
 
+        # Before a file is picked: a missing key or an unwritable folder is no
+        # reason to make the user choose one first.
+        self._sync_settings_from_ui()
+        go, heads_up = self._preflight(self.settings.snapshot(), recording=False)
+        if not go:
+            return
+
         file_types = [
             ("Audio Files", "*.wav *.mp3 *.m4a *.flac *.ogg *.aac *.wma *.mp4 *.webm *.opus *.aiff *.m4b *.amr *.caf"),
             ("WAV Audio", "*.wav"),
@@ -731,7 +774,6 @@ class RecorderApp:
         if not file_path:
             return
 
-        self._sync_settings_from_ui()
         file_basename = os.path.basename(file_path)   # safe_output_name drops the extension
         base_name = self._resolve_output_conflict(
             paths.safe_output_name(self.filename_entry.get() or file_basename))
@@ -747,6 +789,7 @@ class RecorderApp:
         self.status.set("transcribing file…", T.WARN)
         self.transcript.clear()
         self.transcript.append(f"Processing uploaded file: {os.path.basename(file_path)}\n")
+        self._show_heads_up(heads_up)
 
         self.finalizer = pipeline.FileFinalizer(self.bridge,
                                                 self.settings.snapshot())
@@ -848,6 +891,10 @@ class RecorderApp:
 
     def _process_unfinished(self, unfinished):
         self._sync_settings_from_ui()
+        run = self.settings.snapshot()
+        go, heads_up = self._preflight(run, recording=False)
+        if not go:                                  # the tracks stay where they are
+            return
         base_name = self._resolve_output_conflict(
             paths.safe_output_name(unfinished.base_name),
             paths.output_extensions(self.settings.keep_raw_tracks))
@@ -864,10 +911,11 @@ class RecorderApp:
         self.transcript.clear()
         self.transcript.append(
             f"Processing the recovered recording '{unfinished.base_name}'…\n")
+        self._show_heads_up(heads_up)
 
         self.recording_base_name = base_name
         self._processing_base = unfinished.base_name
-        self._run_settings = self.settings.snapshot()
+        self._run_settings = run
         self._start_finalizer(capture.recording_from_unfinished(unfinished),
                               base_name)
 
@@ -1048,6 +1096,8 @@ class RecorderApp:
             self.live_preview.stop()
         if self.live is not None:
             self.live.cancel()
+        if self._prefetch is not None:
+            self._prefetch.cancel()
         if self.finalizer is not None:
             self.finalizer.cancel()
 

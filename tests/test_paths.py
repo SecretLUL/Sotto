@@ -262,12 +262,12 @@ class TestResolveDataDir(unittest.TestCase):
 class TestWritableProbe(unittest.TestCase):
     def test_a_real_directory_is_writable_and_stays_clean(self):
         with tempfile.TemporaryDirectory() as folder:
-            self.assertTrue(paths._is_writable(folder))
+            self.assertTrue(paths.is_writable(folder))
             self.assertEqual(os.listdir(folder), [])
 
     def test_a_missing_directory_is_not(self):
         with tempfile.TemporaryDirectory() as folder:
-            self.assertFalse(paths._is_writable(os.path.join(folder, "missing")))
+            self.assertFalse(paths.is_writable(os.path.join(folder, "missing")))
 
     @unittest.skipUnless(os.name == "nt", "os.access() only misleads on Windows")
     def test_program_files_is_refused_at_once(self):
@@ -280,7 +280,7 @@ class TestWritableProbe(unittest.TestCase):
 
         outcome = []
         worker = threading.Thread(
-            target=lambda: outcome.append(paths._is_writable(folder)), daemon=True)
+            target=lambda: outcome.append(paths.is_writable(folder)), daemon=True)
         worker.start()
         worker.join(timeout=5.0)
 

@@ -261,7 +261,7 @@ class TestControlStates(unittest.TestCase):
 
     def setUp(self):
         from unittest.mock import patch
-        from audio_transcriber import config
+        from audio_transcriber import config, preflight
         from audio_transcriber.audio.capture import AudioEngine
         from audio_transcriber.ui import icons
         from audio_transcriber.ui.app import RecorderApp
@@ -274,6 +274,9 @@ class TestControlStates(unittest.TestCase):
             # Neither the user's real settings nor real audio streams.
             patch.object(config, "load", return_value=(settings, [])),
             patch.object(AudioEngine, "configure", return_value=[]),
+            # Nor this machine's disk space and downloaded models: a warning
+            # would open a real dialog, and these tests are not about that.
+            patch.object(preflight, "check", return_value=[]),
         ]
         for patcher in self.patches:
             patcher.start()
@@ -485,6 +488,222 @@ class TestControlStates(unittest.TestCase):
 
 
 @unittest.skipUnless(_can_open_window(), "no graphical display available")
+class TestPreflightInTheApp(unittest.TestCase):
+    """Trouble is reported before a run starts, not after the recording."""
+
+    def setUp(self):
+        from unittest.mock import patch
+        from audio_transcriber import config
+        from audio_transcriber.audio.capture import AudioEngine
+        from audio_transcriber.ui import icons
+
+        icons._ICON_CACHE.clear()
+        self.out_dir = tempfile.mkdtemp()
+        settings = config.Settings(output_dir=self.out_dir, live_transcribe=False,
+                                   live_preview=False)
+        self.patches = [
+            patch.object(config, "load", return_value=(settings, [])),
+            patch.object(AudioEngine, "configure", return_value=[]),
+        ]
+        for patcher in self.patches:
+            patcher.start()
+        from audio_transcriber.ui.app import RecorderApp
+        self.root = tk.Tk()
+        self.root.withdraw()
+        self.app = RecorderApp(self.root)
+        self.app._monitor_thread = None
+        self.app.filename_entry.delete(0, tk.END)
+        self.app.filename_entry.insert(0, "preflight_test")
+        self.started = []
+        self.closed = False
+        self.app.engine.start_recording = lambda name: self.started.append(name)
+
+    def tearDown(self):
+        import shutil
+        from unittest.mock import patch
+        from audio_transcriber.ui import icons
+        if not self.closed:
+            with patch("audio_transcriber.ui.app.messagebox") as box:
+                box.askyesno.return_value = True
+                self.app.engine._recording = False
+                self.app._work_thread = None
+                self.app.on_close()
+        for patcher in self.patches:
+            patcher.stop()
+        icons._ICON_CACHE.clear()
+        shutil.rmtree(self.out_dir, ignore_errors=True)
+
+    # -- helpers ---------------------------------------------------------
+    def _findings(self, *findings):
+        from unittest.mock import patch
+        from audio_transcriber import preflight
+        return patch.object(preflight, "check", return_value=list(findings))
+
+    def _press_start(self, box=None):
+        from unittest.mock import patch
+        with patch.object(self.app, "_current_devices",
+                          return_value=(object(), None, "")):
+            if box is None:
+                self.app.start_recording()
+            else:
+                with patch("audio_transcriber.ui.app.messagebox", box):
+                    self.app.start_recording()
+
+    def _state(self, button):
+        return str(button["state"])
+
+    def _log(self):
+        return self.app.transcript.text.get("1.0", "end-1c")
+
+    # -- errors ----------------------------------------------------------
+    def test_an_error_stops_the_start_and_says_why(self):
+        from unittest.mock import MagicMock
+        from audio_transcriber import preflight
+        box = MagicMock()
+        with self._findings(preflight.Finding(preflight.ERROR, "No API key set.")):
+            self._press_start(box)
+
+        box.showerror.assert_called_once()
+        self.assertIn("No API key set.", box.showerror.call_args[0][1])
+        self.assertEqual(self.started, [], "nothing was recorded")
+        self.assertEqual(self._state(self.app.start_btn), "normal")
+        self.assertEqual(self._state(self.app.upload_btn), "normal")
+
+    def test_all_errors_are_listed_together(self):
+        from unittest.mock import MagicMock
+        from audio_transcriber import preflight
+        box = MagicMock()
+        with self._findings(preflight.Finding(preflight.ERROR, "First problem."),
+                            preflight.Finding(preflight.ERROR, "Second problem.")):
+            self._press_start(box)
+        message = box.showerror.call_args[0][1]
+        self.assertIn("First problem.", message)
+        self.assertIn("Second problem.", message)
+
+    def test_it_checks_the_settings_as_they_are_in_the_window_now(self):
+        """End to end through the real check: cloud chosen, no key typed."""
+        from unittest.mock import MagicMock, patch
+        self.app.model_combo.current(0)                      # ElevenLabs
+        self.app.api_entry.delete(0, tk.END)
+        box = MagicMock()
+        with patch.dict(os.environ, {"ELEVENLABS_API_KEY": ""}):
+            self._press_start(box)
+        box.showerror.assert_called_once()
+        self.assertIn("API key", box.showerror.call_args[0][1])
+        self.assertEqual(self.started, [])
+
+    # -- warnings --------------------------------------------------------
+    def test_a_warning_asks_and_no_means_no(self):
+        from unittest.mock import MagicMock
+        from audio_transcriber import preflight
+        box = MagicMock()
+        box.askokcancel.return_value = False
+        with self._findings(preflight.Finding(preflight.WARNING, "Only 1 GB free.")):
+            self._press_start(box)
+
+        box.askokcancel.assert_called_once()
+        self.assertIn("Only 1 GB free.", box.askokcancel.call_args[0][1])
+        box.showerror.assert_not_called()
+        self.assertEqual(self.started, [])
+        self.assertEqual(self._state(self.app.start_btn), "normal")
+
+    def test_a_warning_that_is_accepted_lets_the_recording_start(self):
+        from unittest.mock import MagicMock
+        from audio_transcriber import preflight
+        box = MagicMock()
+        box.askokcancel.return_value = True
+        with self._findings(preflight.Finding(preflight.WARNING, "Only 1 GB free.")):
+            self._press_start(box)
+        self.assertEqual(self.started, ["preflight_test"])
+        self.assertEqual(self._state(self.app.stop_btn), "normal")
+
+    # -- notes -----------------------------------------------------------
+    def test_a_note_is_shown_in_the_log_and_nobody_is_asked(self):
+        from unittest.mock import MagicMock
+        from audio_transcriber import preflight
+        box = MagicMock()
+        note = "The model 'large-v3' (3.1 GB) is not on this computer yet."
+        with self._findings(preflight.Finding(preflight.NOTE, note)):
+            self._press_start(box)
+        box.showerror.assert_not_called()
+        box.askokcancel.assert_not_called()
+        self.assertEqual(self.started, ["preflight_test"])
+        self.assertIn(note, self._log())
+
+    def test_a_clean_check_says_nothing_and_just_starts(self):
+        from unittest.mock import MagicMock
+        box = MagicMock()
+        with self._findings():
+            self._press_start(box)
+        box.showerror.assert_not_called()
+        box.askokcancel.assert_not_called()
+        self.assertEqual(self.started, ["preflight_test"])
+
+    # -- the model is fetched while recording ----------------------------
+    def test_the_model_is_fetched_in_the_background_once_recording_runs(self):
+        from unittest.mock import patch
+        with self._findings(), \
+                patch("audio_transcriber.ui.app.pipeline.ModelPrefetch") as prefetch:
+            self._press_start()
+        prefetch.assert_called_once()
+        self.assertIsNot(prefetch.call_args[0][1], self.app.settings,
+                         "it works on the copy the run uses")
+        prefetch.return_value.start.assert_called_once()
+
+    def test_nothing_is_fetched_when_the_recording_does_not_start(self):
+        from unittest.mock import patch
+
+        def refuse(_name):
+            raise RuntimeError("Neither audio source is active.")
+
+        self.app.engine.start_recording = refuse
+        with self._findings(), \
+                patch("audio_transcriber.ui.app.messagebox"), \
+                patch("audio_transcriber.ui.app.pipeline.ModelPrefetch") as prefetch:
+            self._press_start()
+        prefetch.assert_not_called()
+
+    def test_closing_the_window_cancels_the_fetch(self):
+        from unittest.mock import patch
+        with self._findings(), \
+                patch("audio_transcriber.ui.app.pipeline.ModelPrefetch") as prefetch:
+            self._press_start()
+        self.app.engine._recording = False       # let tearDown close quietly
+        self.app._work_thread = None
+        with patch("audio_transcriber.ui.app.messagebox"):
+            self.app.on_close()
+        self.closed = True
+        prefetch.return_value.cancel.assert_called_once()
+
+    # -- uploads ---------------------------------------------------------
+    def test_an_upload_is_checked_before_a_file_is_chosen(self):
+        from unittest.mock import MagicMock, patch
+        from audio_transcriber import preflight
+        box = MagicMock()
+        with self._findings(preflight.Finding(preflight.ERROR, "No API key set.")) as check, \
+                patch("audio_transcriber.ui.app.messagebox", box), \
+                patch("audio_transcriber.ui.app.filedialog") as dialog:
+            self.app.upload_and_transcribe()
+
+        box.showerror.assert_called_once()
+        dialog.askopenfilename.assert_not_called()
+        self.assertFalse(check.call_args.kwargs["recording"],
+                         "an upload needs no room for a recording")
+
+    def test_the_notes_of_an_upload_are_shown_in_the_log(self):
+        from unittest.mock import MagicMock, patch
+        from audio_transcriber import preflight
+        note = "The model 'medium' (1.5 GB) is not on this computer yet."
+        with self._findings(preflight.Finding(preflight.NOTE, note)), \
+                patch("audio_transcriber.ui.app.messagebox", MagicMock()), \
+                patch("audio_transcriber.ui.app.filedialog") as dialog, \
+                patch("audio_transcriber.ui.app.pipeline.FileFinalizer"):
+            dialog.askopenfilename.return_value = os.path.join(self.out_dir, "talk.wav")
+            self.app.upload_and_transcribe()
+        self.assertIn(note, self._log())
+
+
+@unittest.skipUnless(_can_open_window(), "no graphical display available")
 class TestApiKeyHonesty(unittest.TestCase):
     """What the window says about the key must be true on this system."""
 
@@ -667,7 +886,7 @@ class TestRecoveryInTheApp(unittest.TestCase):
     def setUp(self):
         import tempfile
         from unittest.mock import patch
-        from audio_transcriber import config, paths
+        from audio_transcriber import config, paths, preflight
         from audio_transcriber.audio.capture import AudioEngine
         from audio_transcriber.ui import icons
 
@@ -680,6 +899,7 @@ class TestRecoveryInTheApp(unittest.TestCase):
             patch.object(config, "load", return_value=(settings, [])),
             patch.object(AudioEngine, "configure", return_value=[]),
             patch.object(paths, "TMP_DIR", self.tmp),
+            patch.object(preflight, "check", return_value=[]),
         ]
         for patcher in self.patches:
             patcher.start()
@@ -748,6 +968,28 @@ class TestRecoveryInTheApp(unittest.TestCase):
         self.assertEqual(str(self.app.start_btn["state"]), "disabled")
         self.assertFalse(self._banner_shown(), "no banner while it is processed")
         self.assertIs(self.app._work_thread, worker)
+
+    def test_a_recovered_recording_is_checked_first_too(self):
+        """No key, no point starting - and the tracks stay where they are."""
+        from unittest.mock import patch
+        from audio_transcriber import preflight
+        made = _make_raw_tracks(self.tmp, "Interrupted meeting")
+        self._build_app()
+        error = [preflight.Finding(preflight.ERROR, "No API key set.")]
+
+        with patch("audio_transcriber.ui.app.dialogs.ask_recovery",
+                   return_value="process"), \
+                patch.object(preflight, "check", return_value=error) as check, \
+                patch("audio_transcriber.ui.app.messagebox") as box, \
+                patch("audio_transcriber.ui.app.pipeline.Finalizer") as finalizer:
+            self.app.offer_recovery()
+
+        box.showerror.assert_called_once()
+        self.assertFalse(check.call_args.kwargs["recording"])
+        finalizer.assert_not_called()
+        self.assertTrue(all(os.path.exists(path) for path in made))
+        self.assertTrue(self._banner_shown())
+        self.assertEqual(str(self.app.start_btn["state"]), "normal")
 
     def test_a_failed_run_brings_the_banner_back_and_says_the_tracks_are_kept(self):
         from unittest.mock import patch

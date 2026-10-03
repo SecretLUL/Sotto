@@ -35,7 +35,7 @@ HOME_ENV = "AUDIO_TRANSCRIBER_HOME"
 SOURCE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def _is_writable(directory):
+def is_writable(directory):
     """True if a file can really be created there.
 
     os.access() is useless on Windows: it only looks at the read-only attribute
@@ -85,7 +85,7 @@ def resolve_data_dir(source_dir=None, frozen=None, executable=None,
     platform = sys.platform if platform is None else platform
     env = os.environ if env is None else env
     home = os.path.expanduser("~") if home is None else home
-    writable = _is_writable if writable is None else writable
+    writable = is_writable if writable is None else writable
 
     override = (env.get(HOME_ENV) or "").strip()
     if override:

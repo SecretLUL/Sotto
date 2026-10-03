@@ -74,6 +74,18 @@ EXPECTED_SHA256 = {
         "29940d98d42b91fbd05ce489f3ecf7c72f0a42f027e4875919a28fb4c04ea2cf",
 }
 
+# Size of every model file at the pinned revision. Only used to tell the user
+# how much a download is and to see whether the disk has room for it; the hash
+# above is what proves a download right.
+MODEL_SIZE_BYTES = {
+    "tiny": 77_691_713,
+    "base": 147_951_465,
+    "small": 487_601_967,
+    "medium": 1_533_763_059,
+    "large-v3-turbo": 1_624_555_275,
+    "large-v3": 3_095_033_483,
+}
+
 NO_WHISPER_HINT = (
     "The local engine needs whisper.cpp's command-line program (whisper-cli), "
     "which this app only downloads automatically on Windows. Install it - "
@@ -296,6 +308,11 @@ def ensure_whisper_binary(progress=None, log=None, cancelled=None):
 
 def _usable(path, minimum):
     return os.path.exists(path) and os.path.getsize(path) > minimum
+
+
+def model_present(name):
+    """Whether the model is on this computer, ready to use."""
+    return _usable(model_path(name), 1 << 20)
 
 
 def ensure_model(name, progress=None, log=None, cancelled=None):

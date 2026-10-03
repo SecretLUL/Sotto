@@ -209,6 +209,48 @@ class TestConcurrentAndCancelledDownloads(unittest.TestCase):
         download.assert_not_called()
 
 
+class TestModelPresent(unittest.TestCase):
+    """The question the pre-flight check asks: is the model already here?"""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.target = os.path.join(self.dir, "ggml-tiny.bin")
+        patcher = patch.object(binaries, "model_path", lambda _name: self.target)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a_model_file_is_present(self):
+        with open(self.target, "wb") as handle:
+            handle.write(b"x" * (2 << 20))
+        self.assertTrue(binaries.model_present("tiny"))
+
+    def test_no_file_is_not_present(self):
+        self.assertFalse(binaries.model_present("tiny"))
+
+    def test_a_stub_too_small_to_be_a_model_is_not_present(self):
+        """The same rule ensure_model() applies before it downloads again."""
+        with open(self.target, "wb") as handle:
+            handle.write(b"x" * 1000)
+        self.assertFalse(binaries.model_present("tiny"))
+
+    def test_it_agrees_with_ensure_model_about_what_needs_fetching(self):
+        for size in (0, 1000, 2 << 20):
+            with self.subTest(size=size):
+                with open(self.target, "wb") as handle:
+                    handle.write(b"x" * size)
+                with patch.object(binaries, "download",
+                                  return_value=self.target) as download:
+                    binaries.ensure_model("tiny")
+                self.assertEqual(download.called, not binaries.model_present("tiny"))
+
+    def test_the_sizes_are_those_of_the_pinned_files_on_disk_where_we_have_them(self):
+        """Known from the Hugging Face listing of the pinned revision; the
+        downloaded files of the development machine have exactly these sizes."""
+        self.assertEqual(binaries.MODEL_SIZE_BYTES["tiny"], 77_691_713)
+        self.assertEqual(binaries.MODEL_SIZE_BYTES["large-v3"], 3_095_033_483)
+
+
 class TestPinnedDownloads(unittest.TestCase):
     """What is downloaded - and in one case executed - is pinned and verified."""
 
