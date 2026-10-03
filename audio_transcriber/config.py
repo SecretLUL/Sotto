@@ -53,6 +53,10 @@ class Settings:
     # than the small gain against hallucinations, which diarize.py filters
     # out energy-wise anyway.
     use_vad: bool = False
+    # Let whisper.cpp use the GPU (Vulkan on Windows, Metal on a Mac). Off by
+    # default because the Vulkan build crashed reproducibly on one AMD card;
+    # with it on, a run that fails on the GPU is repeated on the CPU.
+    use_gpu: bool = False
     # Recognise while recording, so stopping only has to catch up with the
     # tail. Local models only - see pipeline.live_transcription_possible().
     live_transcribe: bool = True

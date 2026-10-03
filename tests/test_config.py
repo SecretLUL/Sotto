@@ -160,6 +160,32 @@ class TestSettingsFile(unittest.TestCase):
             self.assertTrue(stored)
 
 
+class TestGpuSetting(unittest.TestCase):
+    def test_the_gpu_is_off_unless_asked_for(self):
+        self.assertFalse(config.Settings().use_gpu)
+
+    def test_it_survives_a_save_and_load(self):
+        folder = tempfile.mkdtemp()
+        try:
+            path = os.path.join(folder, "settings.json")
+            config.save(config.Settings(use_gpu=True), path)
+            loaded, _warnings = config.load(path)
+            self.assertTrue(loaded.use_gpu)
+        finally:
+            for name in os.listdir(folder):
+                os.remove(os.path.join(folder, name))
+            os.rmdir(folder)
+
+    def test_it_reaches_both_backends_the_final_pass_and_the_live_ones(self):
+        from audio_transcriber import pipeline
+        settings = config.Settings(model_index=3, use_gpu=True)
+        self.assertTrue(pipeline.build_backend(settings).allow_gpu)
+        self.assertTrue(pipeline.build_backend(settings, greedy=True,
+                                               live=True).allow_gpu)
+        self.assertFalse(pipeline.build_backend(config.Settings(model_index=3))
+                         .allow_gpu)
+
+
 class TestModelSelection(unittest.TestCase):
     def test_cloud_entry(self):
         settings = config.Settings(model_index=0)

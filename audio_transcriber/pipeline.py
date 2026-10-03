@@ -79,6 +79,7 @@ def build_backend(settings, greedy=False, live=False):
         model_name=model,
         threads=settings.threads(),
         use_vad=settings.use_vad,
+        allow_gpu=settings.use_gpu,
         greedy=greedy,
     )
 

@@ -69,6 +69,123 @@ class TestCommandBuilder(unittest.TestCase):
             WhisperCppBackend("tiny").transcribe("does-not-exist.wav")
 
 
+class FakeProcess:
+    """A whisper-cli run that ends the way the test says."""
+
+    def __init__(self, stdout="", stderr="", returncode=0):
+        self.stdout = io.StringIO(stdout)
+        self.stderr = io.StringIO(stderr)
+        self.returncode = returncode
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+    def poll(self):
+        return self.returncode
+
+    def kill(self):
+        pass
+
+
+SEGMENT_LINE = "[00:00:00.000 --> 00:00:02.000]   Hello there.\n"
+
+
+class TestGpuFallback(unittest.TestCase):
+    """The Vulkan build crashed reproducibly (0xC0000409) on one AMD card, so the
+    GPU is opt-in. A run that fails on the GPU is repeated on the CPU - and the
+    GPU is only blamed when that CPU run then works."""
+
+    def setUp(self):
+        WhisperCppBackend._gpu_failed = False
+        self.folder = tempfile.mkdtemp()
+        self.wav = os.path.join(self.folder, "input.wav")
+        open(self.wav, "wb").close()
+        self.commands = []
+
+    def tearDown(self):
+        WhisperCppBackend._gpu_failed = False
+        shutil.rmtree(self.folder, ignore_errors=True)
+
+    @staticmethod
+    def _backend(**options):
+        backend = WhisperCppBackend("tiny", **options)
+        backend.prepare = lambda progress=None, log=None: (
+            "whisper-cli", "model.bin", None)
+        return backend
+
+    def _transcribe(self, backend, runs, log=None):
+        """`runs` are the processes of the successive attempts."""
+        queue = list(runs)
+
+        def fake_popen(command, **_kwargs):
+            self.commands.append(command)
+            return queue.pop(0)
+
+        with patch("audio_transcriber.transcribe.whispercpp.subprocess.Popen",
+                   fake_popen):
+            return backend.transcribe(self.wav, language="de", track="mic", log=log)
+
+    def test_the_setting_reaches_the_command_line(self):
+        gpu = WhisperCppBackend("tiny", allow_gpu=True)
+        self.assertNotIn("-ng", gpu.build_command("e", "m", "a.wav", "de"))
+        self.assertIn("-ng", WhisperCppBackend("tiny").build_command(
+            "e", "m", "a.wav", "de"))
+        self.assertIn("-ng", gpu.build_command("e", "m", "a.wav", "de", gpu=False))
+
+    def test_a_crash_on_the_gpu_is_repeated_on_the_cpu(self):
+        logs = []
+        segments = self._transcribe(
+            self._backend(allow_gpu=True),
+            [FakeProcess(stderr="vulkan crashed", returncode=3221226505),
+             FakeProcess(stdout=SEGMENT_LINE)],
+            log=logs.append)
+
+        self.assertEqual([segment.text for segment in segments], ["Hello there."])
+        self.assertNotIn("-ng", self.commands[0])
+        self.assertIn("-ng", self.commands[1])
+        self.assertTrue(WhisperCppBackend._gpu_failed)
+        self.assertIn("trying again on the CPU", " ".join(logs))
+
+    def test_once_it_failed_later_runs_skip_the_gpu(self):
+        self._transcribe(self._backend(allow_gpu=True),
+                         [FakeProcess(returncode=3), FakeProcess(stdout=SEGMENT_LINE)])
+        self.commands.clear()
+
+        self._transcribe(self._backend(allow_gpu=True),
+                         [FakeProcess(stdout=SEGMENT_LINE)])
+        self.assertEqual(len(self.commands), 1)
+        self.assertIn("-ng", self.commands[0])
+
+    def test_an_unrelated_failure_is_not_blamed_on_the_gpu(self):
+        failing = "error: input file not found"
+        with self.assertRaises(TranscriptionError) as ctx:
+            self._transcribe(self._backend(allow_gpu=True),
+                             [FakeProcess(stderr=failing, returncode=2),
+                              FakeProcess(stderr=failing, returncode=2)])
+        self.assertIn("input file not found", str(ctx.exception))
+        self.assertFalse(WhisperCppBackend._gpu_failed)
+
+    def test_on_the_cpu_a_failure_is_reported_at_once(self):
+        with self.assertRaises(TranscriptionError):
+            self._transcribe(self._backend(),
+                             [FakeProcess(stderr="boom", returncode=1)])
+        self.assertEqual(len(self.commands), 1)
+
+    def test_a_cancel_is_not_retried(self):
+        backend = self._backend(allow_gpu=True)
+
+        class Cancelled(FakeProcess):
+            def wait(self, timeout=None):
+                backend.cancel()
+                return self.returncode
+
+        with self.assertRaises(TranscriptionError) as ctx:
+            self._transcribe(backend, [Cancelled(returncode=1)])
+        self.assertIn("cancelled", str(ctx.exception))
+        self.assertEqual(len(self.commands), 1)
+        self.assertFalse(WhisperCppBackend._gpu_failed)
+
+
 class TestPrepareAndCancel(unittest.TestCase):
     """cancel() has to reach the downloads, and a failed download is an
     expected failure with a message of its own."""

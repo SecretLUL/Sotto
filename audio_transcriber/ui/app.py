@@ -328,6 +328,7 @@ class RecorderApp:
         self.preview_var = tk.BooleanVar(value=self.settings.live_preview)
         self.separate_var = tk.BooleanVar(value=self.settings.separate_tracks)
         self.vad_var = tk.BooleanVar(value=self.settings.use_vad)
+        self.gpu_var = tk.BooleanVar(value=self.settings.use_gpu)
         self.keep_raw_var = tk.BooleanVar(value=self.settings.keep_raw_tracks)
 
         W.Switch(options, "Live transcription", self.live_var).grid(
@@ -340,11 +341,15 @@ class RecorderApp:
             row=0, column=3, sticky="w", padx=(T.MD, 0))
         W.Switch(options, "Keep raw tracks", self.keep_raw_var).grid(
             row=1, column=0, sticky="w", pady=(T.SM, 0))
+        W.Switch(options, "GPU", self.gpu_var).grid(
+            row=1, column=1, sticky="w", padx=(T.MD, 0), pady=(T.SM, 0))
 
         tk.Label(options,
                  text="Live transcription recognises the recording while it "
                       "runs, so stopping only has to catch up with the last "
-                      "few seconds. Local models only.",
+                      "few seconds. Local models only. GPU lets whisper.cpp "
+                      "use the graphics card where its build supports that; "
+                      "if a run fails there it is repeated on the CPU.",
                  bg=T.CARD, fg=T.TEXT_MUTE, font=T.fonts["tiny"],
                  anchor="w", justify="left").grid(
             row=2, column=0, columnspan=4, sticky="w", pady=(T.SM, 0))
@@ -866,6 +871,7 @@ class RecorderApp:
         settings.live_preview = bool(self.preview_var.get())
         settings.separate_tracks = bool(self.separate_var.get())
         settings.use_vad = bool(self.vad_var.get())
+        settings.use_gpu = bool(self.gpu_var.get())
         settings.keep_raw_tracks = bool(self.keep_raw_var.get())
         settings.filename = paths.safe_output_name(self.filename_entry.get())
         raw_out = self.output_dir_entry.get().strip()

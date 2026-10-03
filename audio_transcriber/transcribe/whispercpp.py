@@ -43,6 +43,11 @@ MAX_CONSECUTIVE_REPEATS = 2
 class WhisperCppBackend(Backend):
     name = "whisper.cpp"
 
+    # Set once a GPU run failed where the CPU run that followed worked: the GPU
+    # path of this machine is broken, and nobody asks it again this session.
+    # Shared by all instances on purpose - every track gets a new backend.
+    _gpu_failed = False
+
     def __init__(self, model_name, threads=None, use_vad=False,
                  allow_gpu=False, greedy=False, max_len=45):
         self.model_name = model_name
@@ -81,7 +86,10 @@ class WhisperCppBackend(Backend):
         return exe, model, vad
 
     # ------------------------------------------------------------------
-    def build_command(self, exe, model, wav_path, language, vad_model=None):
+    def build_command(self, exe, model, wav_path, language, vad_model=None,
+                      gpu=None):
+        """The whisper-cli command line. `gpu` overrides allow_gpu for one run."""
+        gpu = self.allow_gpu if gpu is None else gpu
         command = [
             exe,
             "-m", model,
@@ -93,7 +101,7 @@ class WhisperCppBackend(Backend):
             "-np",          # results only on stdout
             "-sns",         # suppress non-speech tokens
         ]
-        if not self.allow_gpu:
+        if not gpu:
             command.append("-ng")
         if self.greedy:
             # Live preview: greedy instead of beam search. Measured 10.7 s -> 8.3 s.
@@ -121,10 +129,39 @@ class WhisperCppBackend(Backend):
         # called after a Turkish or Arabic user would make it fail with "input
         # file not found" (see paths.ansi_safe_path). The executable itself
         # is started through the wide-character API and needs no such care.
-        command = self.build_command(
-            exe, paths.ansi_safe_path(model), paths.ansi_safe_path(wav_path),
-            language, paths.ansi_safe_path(vad) if vad else None)
+        arguments = (exe, paths.ansi_safe_path(model),
+                     paths.ansi_safe_path(wav_path), language,
+                     paths.ansi_safe_path(vad) if vad else None)
 
+        gpu = self.allow_gpu and not WhisperCppBackend._gpu_failed
+        segments, code, detail = self._run_once(
+            self.build_command(*arguments, gpu=gpu), exe, track)
+        if self._cancelled.is_set():
+            raise TranscriptionError("Transcription was cancelled.")
+
+        if code != 0 and gpu:
+            # The GPU path can crash outright (the Vulkan build did, reproducibly,
+            # with 0xC0000409 on one AMD card). The run is not lost: do it again
+            # on the CPU. Only if THAT works was the GPU the problem - after an
+            # unrelated failure (input file, model) it must not be blamed.
+            self._log(log, f"Note: whisper.cpp failed on the GPU (code {code}) - "
+                           f"trying again on the CPU.\n")
+            segments, code, detail = self._run_once(
+                self.build_command(*arguments, gpu=False), exe, track)
+            if self._cancelled.is_set():
+                raise TranscriptionError("Transcription was cancelled.")
+            if code == 0:
+                WhisperCppBackend._gpu_failed = True
+                self._log(log, "The GPU stays off for the rest of this session.\n")
+
+        if code != 0:
+            raise TranscriptionError(
+                f"whisper.cpp failed with code {code}:\n{detail}")
+        return segments
+
+    # ------------------------------------------------------------------
+    def _run_once(self, command, exe, track):
+        """One whisper-cli run: (segments, exit code, tail of its diagnostics)."""
         try:
             proc = subprocess.Popen(
                 command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -188,15 +225,10 @@ class WhisperCppBackend(Backend):
             with self._lock:
                 self._proc = None
 
-        if self._cancelled.is_set():
-            raise TranscriptionError("Transcription was cancelled.")
-
+        detail = ""
         if proc.returncode != 0:
             detail = "\n".join(stderr_lines[-12:]) or f"Exit code {proc.returncode}"
-            raise TranscriptionError(
-                f"whisper.cpp failed with code {proc.returncode}:\n{detail}")
-
-        return segments
+        return segments, proc.returncode, detail
 
     # ------------------------------------------------------------------
     def cancel(self):

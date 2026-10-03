@@ -396,6 +396,12 @@ class TestControlStates(unittest.TestCase):
         self.assertEqual(text.count("device unplugged"), 1)
         self.assertEqual(self.app.status._text, "recording - microphone stopped")
 
+    def test_the_gpu_switch_reaches_the_settings(self):
+        self.assertFalse(self.app.settings.use_gpu)
+        self.app.gpu_var.set(True)
+        self.app._sync_settings_from_ui()
+        self.assertTrue(self.app.settings.use_gpu)
+
     def test_a_direct_upload_call_cannot_slip_past_the_disabled_button(self):
         from unittest.mock import patch
         self.app.upload_btn.config(state="disabled")
