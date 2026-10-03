@@ -171,9 +171,8 @@ class RecorderApp:
         self.recovery_banner = W.Card(parent)
         body = self.recovery_banner.body
         body.columnconfigure(0, weight=1)
-        self.recovery_label = tk.Label(body, bg=T.CARD, fg=T.WARN,
-                                       font=T.fonts["small"], anchor="w",
-                                       justify="left")
+        self.recovery_label = W.WrapLabel(body, bg=T.CARD, fg=T.WARN,
+                                          font=T.fonts["small"])
         self.recovery_label.grid(row=0, column=0, sticky="ew")
         self.recover_btn = W.Button(body, text="Recover…", kind="accent",
                                     width=120, height=32,
@@ -334,6 +333,7 @@ class RecorderApp:
 
         options = tk.Frame(body, bg=T.CARD)
         options.grid(row=0, column=0, sticky="ew")
+        options.columnconfigure(0, weight=1)
 
         self.live_var = tk.BooleanVar(value=self.settings.live_transcribe)
         self.preview_var = tk.BooleanVar(value=self.settings.live_preview)
@@ -342,34 +342,31 @@ class RecorderApp:
         self.gpu_var = tk.BooleanVar(value=self.settings.use_gpu)
         self.keep_raw_var = tk.BooleanVar(value=self.settings.keep_raw_tracks)
 
-        W.Switch(options, "Live transcription", self.live_var).grid(
-            row=0, column=0, sticky="w")
-        W.Switch(options, "Live preview", self.preview_var).grid(
-            row=0, column=1, sticky="w", padx=(T.MD, 0))
-        W.Switch(options, "Separate tracks", self.separate_var).grid(
-            row=0, column=2, sticky="w", padx=(T.MD, 0))
-        W.Switch(options, "VAD", self.vad_var).grid(
-            row=0, column=3, sticky="w", padx=(T.MD, 0))
-        W.Switch(options, "Keep raw tracks", self.keep_raw_var).grid(
-            row=1, column=0, sticky="w", pady=(T.SM, 0))
-        W.Switch(options, "GPU", self.gpu_var).grid(
-            row=1, column=1, sticky="w", padx=(T.MD, 0), pady=(T.SM, 0))
-
-        tk.Label(options,
-                 text="Live transcription recognises the recording while it "
-                      "runs, so stopping only has to catch up with the last "
-                      "few seconds. Local models only. GPU lets whisper.cpp "
-                      "use the graphics card where its build supports that; "
-                      "if a run fails there it is repeated on the CPU.",
-                 bg=T.CARD, fg=T.TEXT_MUTE, font=T.fonts["tiny"],
-                 anchor="w", justify="left").grid(
-            row=2, column=0, columnspan=4, sticky="w", pady=(T.SM, 0))
+        # The switches wrap onto a second line where the width runs out, and
+        # the hint below wraps too: six switches in grid columns plus a long
+        # one-line hint pushed the last of them out of the window.
+        switches = W.Flow(options)
+        switches.grid(row=0, column=0, sticky="ew")
+        for caption, variable in (("Live transcription", self.live_var),
+                                  ("Live preview", self.preview_var),
+                                  ("Separate tracks", self.separate_var),
+                                  ("VAD", self.vad_var),
+                                  ("Keep raw tracks", self.keep_raw_var),
+                                  ("GPU", self.gpu_var)):
+            switches.add(W.Switch(switches, caption, variable))
 
         self.save_settings_btn = W.Button(options, text="Save settings",
                                           kind="ghost", width=150, height=32,
                                           command=self.save_settings)
-        self.save_settings_btn.grid(row=0, column=4, sticky="e", padx=(T.MD, 0))
-        options.columnconfigure(4, weight=1)
+        self.save_settings_btn.grid(row=0, column=1, sticky="ne", padx=(T.MD, 0))
+
+        W.WrapLabel(options,
+                    text="Live transcription recognises the recording while it "
+                         "runs, so stopping only has to catch up with the last "
+                         "few seconds. Local models only. GPU lets whisper.cpp "
+                         "use the graphics card where its build supports that; "
+                         "if a run fails there it is repeated on the CPU.").grid(
+            row=1, column=0, columnspan=2, sticky="ew", pady=(T.SM, 0))
 
 
     # ------------------------------------------------------------------

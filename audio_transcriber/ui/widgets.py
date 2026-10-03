@@ -741,6 +741,80 @@ def _looks_like_timestamp(token):
 
 
 # ======================================================================
+class WrapLabel(tk.Label):
+    """A label that wraps its text to the width the layout gives it.
+
+    A plain Label asks for the width of its longest line, and in a grid cell
+    or a packed row that request wins: a long hint stretched the columns above
+    it - the Processing Options card pushed its last switches out of the window
+    - or was simply cut off at the edge of its card. This one asks for next to
+    nothing and wraps to whatever width it is then given, so it has to be
+    stretched: pack(fill=X) or grid(sticky="ew").
+    """
+
+    def __init__(self, parent, text="", bg=T.CARD, fg=T.TEXT_MUTE, font=None, **kw):
+        kw.setdefault("anchor", "w")
+        kw.setdefault("justify", "left")
+        super().__init__(parent, text=text, bg=bg, fg=fg,
+                         font=font or T.fonts["tiny"], width=1, **kw)
+        self.bind("<Configure>", self._on_configure)
+
+    def _on_configure(self, event):
+        # A few pixels of the width are the label's own border and padding.
+        width = max(1, event.width - 4)
+        if event.width > 1 and width != int(self.cget("wraplength") or 0):
+            self.configure(wraplength=width)
+
+
+# ======================================================================
+class Flow(tk.Frame):
+    """Children side by side, wrapping onto the next line where the width runs out.
+
+    A row of switches in a grid has a fixed number of columns and so a fixed
+    least width: what fitted at 100 % did not at 150 % or with a longer caption,
+    and the switches at the end were just outside the window. Here they move
+    down instead. Create the children with the Flow as their parent, then add()
+    them in order.
+    """
+
+    def __init__(self, parent, bg=T.CARD, gap=None, line_gap=None):
+        super().__init__(parent, bg=bg, width=1, height=1)
+        self._gap = T.MD if gap is None else gap
+        self._line_gap = T.SM if line_gap is None else line_gap
+        self._items = []
+        self._width = 0
+        self.bind("<Configure>", self._on_configure)
+
+    def add(self, widget):
+        self._items.append(widget)
+        self._layout()
+
+    def fit(self, width):
+        """Lay the children out for a Flow that is `width` pixels wide."""
+        self._width = width
+        self._layout()
+
+    def _on_configure(self, event):
+        if event.width != self._width:
+            self.fit(event.width)
+
+    def _layout(self):
+        limit = self._width if self._width > 1 else 0     # 0: not laid out yet
+        x = y = line_height = 0
+        for item in self._items:
+            width, height = item.winfo_reqwidth(), item.winfo_reqheight()
+            if limit and x and x + width > limit:
+                x, y, line_height = 0, y + line_height + self._line_gap, 0
+            item.place(x=x, y=y)
+            x += width + self._gap
+            line_height = max(line_height, height)
+        needed = y + line_height
+        # place() does not take part in size negotiation: say how tall this is.
+        if needed and needed != int(self.cget("height")):
+            self.configure(height=needed)
+
+
+# ======================================================================
 class Field(tk.Frame):
     """A labelled entry or select field with an optional icon."""
 
@@ -757,6 +831,5 @@ class Field(tk.Frame):
         self.widget = widget_factory(self)
         self.widget.pack(fill=tk.X)
         if hint:
-            tk.Label(self, text=hint, bg=bg, fg=T.TEXT_MUTE,
-                     font=T.fonts["tiny"], anchor="w",
-                     justify="left").pack(fill=tk.X, pady=(4, 0))
+            self.hint = WrapLabel(self, text=hint, bg=bg)
+            self.hint.pack(fill=tk.X, pady=(4, 0))
