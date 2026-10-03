@@ -24,6 +24,7 @@ are collected and reported at start.
 
 import math
 import os
+import re
 import threading
 import time
 from collections import deque
@@ -86,6 +87,15 @@ class RecordingResult:
     def has_audio(self):
         return any(track is not None and track.frames > 0
                    for track in (self.mic, self.sys))
+
+    def discard(self):
+        """Delete the track files - an empty recording is not worth recovering."""
+        for track in (self.mic, self.sys):
+            if track is not None:
+                try:
+                    os.remove(track.path)
+                except OSError:
+                    pass
 
 
 class _Track:
@@ -507,3 +517,89 @@ def load_track(track_result, target_rate=dsp.TARGET_RATE):
     if pad > 0:
         resampled = np.concatenate([np.zeros(pad, dtype=np.float32), resampled])
     return resampled
+
+
+# ----------------------------------------------------------------------
+# Recordings that were interrupted
+# ----------------------------------------------------------------------
+_RAW_NAME = re.compile(r"^(?P<base>.+)\.(?P<kind>mic|sys)\.raw\.wav$")
+
+
+@dataclass
+class UnfinishedRecording:
+    """Raw tracks in the temp folder that never made it into a transcript.
+
+    That is a recording cut short (window closed, crash, power cut) or one whose
+    processing failed - the raw tracks are only deleted after success, and with
+    "Keep raw tracks" they are moved to the output folder, so anything still
+    sitting here was never finished.
+    """
+    base_name: str
+    tracks: dict                     # "mic" | "sys" -> TrackResult
+    modified: float = 0.0            # newest write time, seconds since the epoch
+
+    @property
+    def duration_s(self):
+        return max((track.duration_s for track in self.tracks.values()),
+                   default=0.0)
+
+
+def find_unfinished(tmp_dir, exclude=()):
+    """The interrupted recordings in `tmp_dir`, newest first.
+
+    `exclude` holds base names that are in use right now (the recording being
+    made, the one being processed). Files without audio are ignored; a track
+    that was not closed properly is still readable - libsndfile takes the data
+    up to the end of the file.
+    """
+    try:
+        names = os.listdir(tmp_dir)
+    except OSError:
+        return []
+
+    found = {}
+    for name in names:
+        match = _RAW_NAME.match(name)
+        if match is None or match.group("base") in exclude:
+            continue
+        path = os.path.join(tmp_dir, name)
+        try:
+            info = sf.info(path)
+            modified = os.path.getmtime(path)
+        except (RuntimeError, OSError):
+            continue                          # not audio / vanished meanwhile
+        if info.frames <= 0:
+            continue
+        recording = found.setdefault(
+            match.group("base"), UnfinishedRecording(match.group("base"), {}))
+        recording.tracks[match.group("kind")] = TrackResult(
+            path=path, rate=info.samplerate, frames=info.frames,
+            device_name="recovered")
+        recording.modified = max(recording.modified, modified)
+
+    return sorted(found.values(), key=lambda item: item.modified, reverse=True)
+
+
+def recording_from_unfinished(unfinished):
+    """A RecordingResult the finalizer can process, built from the files alone.
+
+    What was only known while recording - the start offset between the two
+    tracks - is gone, so they are lined up at the start of their files; a
+    stream that began a little later than the other will be that much off.
+    """
+    result = RecordingResult(
+        mic=unfinished.tracks.get("mic"), sys=unfinished.tracks.get("sys"))
+    result.warnings.append(
+        "Recovered from an interrupted recording. The exact start offset "
+        "between the two tracks is unknown, so they are aligned at the start "
+        "of their files.")
+    return result
+
+
+def remove_unfinished(unfinished):
+    """Delete the raw tracks of an interrupted recording."""
+    for track in unfinished.tracks.values():
+        try:
+            os.remove(track.path)
+        except OSError:
+            pass

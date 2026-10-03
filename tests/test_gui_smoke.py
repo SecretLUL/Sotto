@@ -194,9 +194,9 @@ class TestOutputConflictDialog(unittest.TestCase):
         icons._ICON_CACHE.clear()
         shutil.rmtree(self.out_dir, ignore_errors=True)
 
-    def _open(self, base_name="my_meeting"):
+    def _open(self, base_name="my_meeting", extensions=None):
         from audio_transcriber.ui.dialogs import OutputConflictDialog
-        return OutputConflictDialog(self.root, self.out_dir, base_name)
+        return OutputConflictDialog(self.root, self.out_dir, base_name, extensions)
 
     def test_overwrite_keeps_the_original_name(self):
         dialog = self._open()
@@ -235,6 +235,18 @@ class TestOutputConflictDialog(unittest.TestCase):
         dialog = self._open()
         dialog.cancel_btn.invoke()
         self.assertIsNone(dialog.result)
+
+    def test_kept_raw_tracks_are_part_of_the_conflict_when_they_are_written(self):
+        from audio_transcriber import paths
+        with open(os.path.join(self.out_dir, "fresh.mic.wav"), "w") as handle:
+            handle.write("x")
+        dialog = self._open("fresh", paths.output_extensions(keep_raw_tracks=True))
+        try:
+            self.assertIn("fresh.mic.wav", dialog.message.cget("text"))
+            self.assertEqual(dialog.suggestion, "fresh_2")
+            self.assertIn("would be replaced", dialog.hint.cget("text"))
+        finally:
+            dialog._cancel()
 
 
 @unittest.skipUnless(_can_open_window(), "no graphical display available")
@@ -390,6 +402,297 @@ class TestControlStates(unittest.TestCase):
         with patch("audio_transcriber.ui.app.filedialog") as dialog:
             self.app.upload_and_transcribe()
         dialog.askopenfilename.assert_not_called()
+
+
+def _make_raw_tracks(folder, base, kinds=("mic", "sys"), seconds=2.0, rate=16000):
+    """Raw track files the way the capture engine leaves them behind."""
+    import numpy as np
+    import soundfile as sf
+    made = []
+    for kind in kinds:
+        path = os.path.join(folder, f"{base}.{kind}.raw.wav")
+        data = np.random.default_rng(0).normal(0, 0.1, int(seconds * rate))
+        sf.write(path, data.astype("float32"), rate, subtype="PCM_16")
+        made.append(path)
+    return made
+
+
+@unittest.skipUnless(_can_open_window(), "no graphical display available")
+class TestRecoveryDialog(unittest.TestCase):
+    """Process, delete or postpone a recording that never reached a transcript."""
+
+    def setUp(self):
+        from audio_transcriber.audio import capture
+        from audio_transcriber.ui import icons, theme
+        icons._ICON_CACHE.clear()
+        self.root = tk.Tk()
+        self.root.withdraw()
+        theme.apply(self.root)
+        self.unfinished = capture.UnfinishedRecording(
+            "Team Meeting",
+            {"mic": capture.TrackResult(path="x", rate=48000, frames=48000 * 65)},
+            modified=1_700_000_000.0)
+
+    def tearDown(self):
+        from audio_transcriber.ui import icons
+        self.root.destroy()
+        icons._ICON_CACHE.clear()
+
+    def _open(self, more=0):
+        from audio_transcriber.ui.dialogs import RecoveryDialog
+        return RecoveryDialog(self.root, self.unfinished, more)
+
+    def test_the_message_says_what_was_found(self):
+        dialog = self._open()
+        try:
+            text = dialog.message.cget("text")
+            self.assertIn("'Team Meeting'", text)
+            self.assertIn("01:05", text)
+            self.assertIn("microphone", text)
+            self.assertNotIn("system audio", text)
+        finally:
+            dialog._dismiss()
+
+    def test_the_three_answers(self):
+        for button, expected in (("process_btn", "process"),
+                                 ("delete_btn", "delete"),
+                                 ("later_btn", None)):
+            with self.subTest(button=button):
+                dialog = self._open()
+                getattr(dialog, button).invoke()
+                self.assertEqual(dialog.result, expected)
+
+    def test_closing_the_window_means_later_never_delete(self):
+        dialog = self._open()
+        dialog._dismiss()
+        self.assertIsNone(dialog.result)
+
+    def test_more_waiting_recordings_are_mentioned(self):
+        dialog = self._open(more=2)
+        try:
+            labels = []
+
+            def collect(widget):
+                if isinstance(widget, tk.Label):
+                    labels.append(str(widget.cget("text")))
+                for child in widget.winfo_children():
+                    collect(child)
+
+            collect(dialog)
+            self.assertIn("2 more unfinished recordings are waiting",
+                          " ".join(labels))
+        finally:
+            dialog._dismiss()
+
+
+@unittest.skipUnless(_can_open_window(), "no graphical display available")
+class TestRecoveryInTheApp(unittest.TestCase):
+    """An interrupted recording is offered again instead of being lost.
+
+    Closing the window mid-recording, a crash or a failed run leaves the raw
+    tracks in the temp folder; nothing used to look at them again.
+    """
+
+    def setUp(self):
+        import tempfile
+        from unittest.mock import patch
+        from audio_transcriber import config, paths
+        from audio_transcriber.audio.capture import AudioEngine
+        from audio_transcriber.ui import icons
+
+        icons._ICON_CACHE.clear()
+        self.tmp = tempfile.mkdtemp()
+        self.out_dir = tempfile.mkdtemp()
+        settings = config.Settings(output_dir=self.out_dir, live_transcribe=False,
+                                   live_preview=False)
+        self.patches = [
+            patch.object(config, "load", return_value=(settings, [])),
+            patch.object(AudioEngine, "configure", return_value=[]),
+            patch.object(paths, "TMP_DIR", self.tmp),
+        ]
+        for patcher in self.patches:
+            patcher.start()
+        self.app = None
+        self.closed = False
+
+    def tearDown(self):
+        import shutil
+        from audio_transcriber.ui import icons
+        if self.app is not None and not self.closed:
+            self.app.engine._recording = False
+            self.app._work_thread = None
+            self.app.on_close()
+        for patcher in self.patches:
+            patcher.stop()
+        icons._ICON_CACHE.clear()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        shutil.rmtree(self.out_dir, ignore_errors=True)
+
+    def _build_app(self):
+        from audio_transcriber.ui.app import RecorderApp
+        self.root = tk.Tk()
+        self.root.withdraw()
+        self.app = RecorderApp(self.root)
+        self.app._monitor_thread = None
+        return self.app
+
+    def _banner_shown(self):
+        return self.app.recovery_banner.winfo_manager() == "pack"
+
+    # -- the banner ------------------------------------------------------
+    def test_the_banner_shows_at_start_when_a_recording_was_interrupted(self):
+        _make_raw_tracks(self.tmp, "Interrupted meeting")
+        self._build_app()
+        self.assertTrue(self._banner_shown())
+        self.assertIn("Interrupted meeting", self.app.recovery_label.cget("text"))
+
+    def test_there_is_no_banner_when_nothing_is_waiting(self):
+        self._build_app()
+        self.assertFalse(self._banner_shown())
+
+    # -- the offer -------------------------------------------------------
+    def test_processing_hands_the_tracks_to_the_finalizer(self):
+        from unittest.mock import MagicMock, patch
+        from audio_transcriber.audio.capture import RecordingResult
+        made = _make_raw_tracks(self.tmp, "Interrupted meeting")
+        self._build_app()
+        worker = MagicMock()
+        worker.is_alive.return_value = True
+
+        with patch("audio_transcriber.ui.app.dialogs.ask_recovery",
+                   return_value="process"):
+            with patch("audio_transcriber.ui.app.pipeline.Finalizer") as finalizer:
+                finalizer.return_value.run_async.return_value = worker
+                self.app.offer_recovery()
+
+        finalizer.return_value.run_async.assert_called_once()
+        recording, base_name = finalizer.return_value.run_async.call_args[0]
+        self.assertIsInstance(recording, RecordingResult)
+        self.assertEqual(base_name, "Interrupted meeting")
+        self.assertEqual(sorted([recording.mic.path, recording.sys.path]),
+                         sorted(made))
+        self.assertIn("Recovered", " ".join(recording.warnings))
+        self.assertEqual(str(self.app.upload_btn["state"]), "disabled")
+        self.assertEqual(str(self.app.start_btn["state"]), "disabled")
+        self.assertFalse(self._banner_shown(), "no banner while it is processed")
+        self.assertIs(self.app._work_thread, worker)
+
+    def test_a_failed_run_brings_the_banner_back_and_says_the_tracks_are_kept(self):
+        from unittest.mock import patch
+        from audio_transcriber.events import Failed
+        _make_raw_tracks(self.tmp, "Interrupted meeting")
+        self._build_app()
+
+        with patch("audio_transcriber.ui.app.messagebox"):
+            self.app._on_failed(Failed(message="No ElevenLabs API key"))
+
+        text = self.app.transcript.text.get("1.0", "end-1c")
+        self.assertIn("The recorded tracks were kept", text)
+        self.assertTrue(self._banner_shown())
+
+    def test_deleting_asks_first_and_then_removes_the_tracks(self):
+        from unittest.mock import patch
+        made = _make_raw_tracks(self.tmp, "Interrupted meeting")
+        self._build_app()
+
+        with patch("audio_transcriber.ui.app.dialogs.ask_recovery",
+                   return_value="delete"):
+            with patch("audio_transcriber.ui.app.messagebox") as box:
+                box.askyesno.return_value = False
+                self.app.offer_recovery()
+                self.assertTrue(all(os.path.exists(path) for path in made),
+                                "declined: nothing is deleted")
+
+                box.askyesno.return_value = True
+                self.app.offer_recovery()
+
+        self.assertFalse(any(os.path.exists(path) for path in made))
+        self.assertFalse(self._banner_shown())
+
+    def test_later_changes_nothing(self):
+        from unittest.mock import patch
+        made = _make_raw_tracks(self.tmp, "Interrupted meeting")
+        self._build_app()
+        with patch("audio_transcriber.ui.app.dialogs.ask_recovery",
+                   return_value=None):
+            with patch("audio_transcriber.ui.app.pipeline.Finalizer") as finalizer:
+                self.app.offer_recovery()
+        finalizer.assert_not_called()
+        self.assertTrue(all(os.path.exists(path) for path in made))
+        self.assertTrue(self._banner_shown())
+
+    def test_nothing_is_offered_while_a_recording_is_running(self):
+        from unittest.mock import patch
+        _make_raw_tracks(self.tmp, "Interrupted meeting")
+        self._build_app()
+        self.app.engine._recording = True
+        with patch("audio_transcriber.ui.app.dialogs.ask_recovery") as ask:
+            self.app.offer_recovery()
+        ask.assert_not_called()
+
+    def test_the_recording_being_made_is_not_taken_for_an_interrupted_one(self):
+        from audio_transcriber.audio import capture
+        _make_raw_tracks(self.tmp, "live take")
+        _make_raw_tracks(self.tmp, "left over")
+        self._build_app()
+        self.app.engine._recording = True
+        self.app.recording_base_name = "live take"
+        names = [item.base_name for item in
+                 capture.find_unfinished(self.tmp, exclude=self.app._in_use())]
+        self.assertEqual(names, ["left over"])
+
+    # -- closing the window ----------------------------------------------
+    def test_closing_during_a_recording_asks_first(self):
+        from unittest.mock import patch
+        self._build_app()
+        self.app.engine._recording = True
+        with patch("audio_transcriber.ui.app.messagebox") as box:
+            box.askyesno.return_value = False
+            self.app.on_close()
+            self.assertTrue(self.root.winfo_exists(), "declined: stay open")
+            self.assertFalse(self.app._shutting_down)
+            self.assertIn("recording is running", box.askyesno.call_args[0][1])
+
+            box.askyesno.return_value = True
+            self.app.on_close()
+        self.closed = True
+        self.assertTrue(self.app._shutting_down)
+
+    def test_closing_while_processing_asks_too(self):
+        from unittest.mock import MagicMock, patch
+        self._build_app()
+        worker = MagicMock()
+        worker.is_alive.return_value = True
+        self.app._work_thread = worker
+        with patch("audio_transcriber.ui.app.messagebox") as box:
+            box.askyesno.return_value = False
+            self.app.on_close()
+        box.askyesno.assert_called_once()
+        self.assertIn("being processed", box.askyesno.call_args[0][1])
+        self.assertTrue(self.root.winfo_exists())
+
+    def test_closing_when_idle_just_closes(self):
+        from unittest.mock import patch
+        self._build_app()
+        with patch("audio_transcriber.ui.app.messagebox") as box:
+            self.app.on_close()
+        box.askyesno.assert_not_called()
+        self.closed = True
+
+    # -- an empty recording ----------------------------------------------
+    def test_an_empty_recording_leaves_no_files_to_recover(self):
+        from unittest.mock import patch
+        import numpy as np
+        import soundfile as sf
+        from audio_transcriber.audio.capture import RecordingResult, TrackResult
+        path = os.path.join(self.tmp, "nothing.mic.raw.wav")
+        sf.write(path, np.zeros(0, dtype="float32"), 16000, subtype="PCM_16")
+        self._build_app()
+        recording = RecordingResult(mic=TrackResult(path=path, rate=16000, frames=0))
+        self.app.engine.stop_recording = lambda: recording
+        with patch("audio_transcriber.ui.app.messagebox"):
+            self.app.stop_recording()
+        self.assertFalse(os.path.exists(path))
 
 
 @unittest.skipUnless(_can_open_window(), "no graphical display available")

@@ -16,6 +16,7 @@ covered_s and are merged through the same diarize pass as before.
 """
 
 import os
+import shutil
 import threading
 from dataclasses import replace
 
@@ -281,16 +282,42 @@ class Finalizer(_ScratchFiles):
         with open(txt_path, "w", encoding="utf-8") as handle:
             handle.write(text + "\n")
 
-        # --- 6. Clean up -------------------------------------------------
+        # --- 6. The recorded originals ------------------------------------
         # The normalised copies made for recognition are scratch files and go
-        # in every case (_process removes them, success or not); "keep raw
-        # tracks" is about the recorded originals.
-        if not settings.keep_raw_tracks:
-            for track in (recording.mic, recording.sys):
-                if track and os.path.exists(track.path):
-                    _try_remove(track.path)
+        # in every case (_process removes them, success or not). The recorded
+        # tracks are what "keep raw tracks" is about: they move next to the
+        # transcript, where a DAW can find them - not into the hidden temp
+        # folder, where the next run under the same name would overwrite them
+        # and the check for interrupted recordings would take them for one.
+        for kind, track in (("mic", recording.mic), ("sys", recording.sys)):
+            if track is None or not os.path.exists(track.path):
+                continue
+            if settings.keep_raw_tracks:
+                self._keep_raw_track(track, kind, out_dir, base_name)
+            else:
+                _try_remove(track.path)
 
         bridge.post(Finished(text=text, txt_path=txt_path, audio_path=mix_path))
+
+    def _keep_raw_track(self, track, kind, out_dir, base_name):
+        label = "microphone track" if kind == "mic" else "system track"
+        target = paths.raw_track_path(out_dir, base_name, kind)
+        try:
+            _move_file(track.path, target)
+        except OSError as exc:
+            # The transcript is done; failing the run over this would throw
+            # that away. The track stays where it was and is found again by
+            # the check for unfinished recordings.
+            self.bridge.post(Log(f"⚠ The {label} could not be kept ({exc}); "
+                                 f"it stays at {track.path}.\n"))
+            return
+        offset = ""
+        if track.start_offset_s > 0.005:
+            offset = (f", starts {track.start_offset_s:.2f} s after the other "
+                      f"track")
+        self.bridge.post(Log(
+            f"Kept the {label}: {os.path.basename(target)} "
+            f"({track.rate / 1000:g} kHz mono{offset})\n"))
 
     # ------------------------------------------------------------------
     def _live_results(self, recording, length):
@@ -861,6 +888,15 @@ def _try_remove(path):
         os.remove(path)
     except OSError:
         pass
+
+
+def _move_file(source, target):
+    """Rename, or copy and delete when the target is on another drive."""
+    try:
+        os.replace(source, target)
+    except OSError:
+        shutil.copyfile(source, target)
+        _try_remove(source)
 
 
 def _same_file(first, second):

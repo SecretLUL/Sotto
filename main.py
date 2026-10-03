@@ -38,7 +38,11 @@ def main():
         # packaged build older than this one kept them inside _internal.
         paths.migrate_legacy_data()
         root = tk.Tk()
-        RecorderApp(root)
+        app = RecorderApp(root)
+        # Once the window is up: offer to process a recording that was cut
+        # short last time. Not in the constructor - the tests build the window
+        # too, and a modal question would hang them.
+        root.after(400, app.offer_recovery)
         root.mainloop()
     except Exception:
         _fatal("The application could not be started:\n\n"

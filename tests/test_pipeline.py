@@ -5,6 +5,7 @@ import queue
 import shutil
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import soundfile as sf
@@ -205,11 +206,66 @@ class TestFinalizer(unittest.TestCase):
                      if name.endswith(".asr.wav")]
         self.assertEqual(leftovers, [])
 
-    def test_keep_raw_tracks_option(self):
+    def test_kept_raw_tracks_land_next_to_the_transcript(self):
+        """README: 'Keep raw tracks' preserves the unmixed tracks for a DAW. They
+        used to stay in the hidden temp folder - overwritten by the next run of
+        the same name, and invisible in the output folder the user chose."""
         self.settings.keep_raw_tracks = True
         recording = self._make_recording()
+        original = [recording.mic.path, recording.sys.path]
+        events = self._run(recording, {"mic": [(1.0, 3.0, "A")], "sys": []})
+
+        for kind in ("mic", "sys"):
+            kept = os.path.join(self.out, f"session.{kind}.wav")
+            self.assertTrue(os.path.exists(kept), kept)
+            info = sf.info(kept)
+            self.assertEqual((info.samplerate, info.channels), (RATE, 1))
+        for path in original:
+            self.assertFalse(os.path.exists(path), f"{path} was not moved")
+
+        logs = " ".join(e.text for e in events if isinstance(e, Log))
+        self.assertIn("Kept the microphone track: session.mic.wav", logs)
+        self.assertIn("Kept the system track: session.sys.wav", logs)
+
+    def test_without_the_option_no_raw_track_is_left_anywhere(self):
+        self.settings.keep_raw_tracks = False
+        recording = self._make_recording()
         self._run(recording, {"mic": [(1.0, 3.0, "A")], "sys": []})
+
+        self.assertFalse(os.path.exists(recording.mic.path))
+        self.assertFalse(os.path.exists(recording.sys.path))
+        self.assertFalse([n for n in os.listdir(self.out)
+                          if n.endswith((".mic.wav", ".sys.wav"))])
+
+    def test_a_track_that_cannot_be_kept_stays_and_the_run_still_finishes(self):
+        """The transcript is done by then - failing over a move would throw it
+        away. The track stays in the temp folder, where the recovery finds it."""
+        self.settings.keep_raw_tracks = True
+        recording = self._make_recording()
+        with patch("audio_transcriber.pipeline._move_file",
+                   side_effect=OSError("disk full")):
+            events = self._run(recording, {"mic": [(1.0, 3.0, "A")], "sys": []})
+
+        self.assertIsNotNone(self.bridge.first(Finished, events))
         self.assertTrue(os.path.exists(recording.mic.path))
+        logs = " ".join(e.text for e in events if isinstance(e, Log))
+        self.assertIn("could not be kept (disk full)", logs)
+
+    def test_moving_falls_back_to_copying_across_drives(self):
+        folder = tempfile.mkdtemp()
+        try:
+            source = os.path.join(folder, "a.raw.wav")
+            target = os.path.join(folder, "a.mic.wav")
+            with open(source, "wb") as handle:
+                handle.write(b"audio")
+            with patch("audio_transcriber.pipeline.os.replace",
+                       side_effect=OSError("different drive")):
+                pipeline._move_file(source, target)
+            self.assertFalse(os.path.exists(source))
+            with open(target, "rb") as handle:
+                self.assertEqual(handle.read(), b"audio")
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
 
     # ------------------------------------------------------------------
     def _spy(self, per_track):
@@ -257,7 +313,8 @@ class TestFinalizer(unittest.TestCase):
         recording = self._make_recording()
         self._run(recording, {"mic": [(1.0, 3.0, "A")], "sys": []})
 
-        self.assertTrue(os.path.exists(recording.mic.path), "originals stay")
+        self.assertTrue(os.path.exists(os.path.join(self.out, "session.mic.wav")),
+                        "the recorded track is what gets kept")
         leftovers = [name for name in os.listdir(self.tmp)
                      if name.endswith(".asr.wav")]
         self.assertEqual(leftovers, [])

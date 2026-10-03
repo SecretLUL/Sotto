@@ -23,10 +23,12 @@ except ImportError:
     import pyaudio
 
 from .. import config, paths, pipeline
+from ..audio import capture
 from ..audio import devices as devmod
 from ..audio.capture import AudioEngine
 from ..events import (Failed, Finished, LivePreview, Log, Progress, Status,
                       UiBridge)
+from ..transcribe.base import format_clock
 from . import dialogs, icons
 from . import theme as T
 from . import widgets as W
@@ -58,6 +60,9 @@ class RecorderApp:
         self.live_preview = None
         self.recording_base_name = None
         self.recording_started_at = None
+        self._work_thread = None         # the finalizer thread of the current run
+        self._processing_base = None     # raw-track name of a recovered recording
+        self._unfinished = []            # what find_unfinished() saw last
         self._monitor_thread = None
         self._start_deadline = 0.0
         self._shutting_down = False
@@ -68,6 +73,7 @@ class RecorderApp:
         self._build()
         self._wire_events()
         self.bridge.start()
+        self._refresh_recovery_banner()
 
         for warning in warnings:
             self.transcript.append(f"⚠ {warning}\n")
@@ -103,6 +109,7 @@ class RecorderApp:
         # Tab 1: Recorder
         recorder_container = tk.Frame(self.tab_recorder, bg=T.BG)
         recorder_container.pack(fill=tk.BOTH, expand=True, pady=(T.SM, 0))
+        self._build_recovery_banner(recorder_container)
         self._build_sources(recorder_container)
         self._build_record_bar(recorder_container)
 
@@ -142,6 +149,25 @@ class RecorderApp:
 
         self.status = W.StatusPill(head, bg=T.BG, width=260, height=36)
         self.status.pack(side=tk.RIGHT, anchor="e")
+
+    # ------------------------------------------------------------------
+    def _build_recovery_banner(self, parent):
+        """A line above the sources while an interrupted recording is waiting.
+
+        Built but not packed: _refresh_recovery_banner() shows it only when
+        there is something to recover.
+        """
+        self.recovery_banner = W.Card(parent)
+        body = self.recovery_banner.body
+        body.columnconfigure(0, weight=1)
+        self.recovery_label = tk.Label(body, bg=T.CARD, fg=T.WARN,
+                                       font=T.fonts["small"], anchor="w",
+                                       justify="left")
+        self.recovery_label.grid(row=0, column=0, sticky="ew")
+        self.recover_btn = W.Button(body, text="Recover…", kind="accent",
+                                    width=120, height=32,
+                                    command=self.offer_recovery)
+        self.recover_btn.grid(row=0, column=1, padx=(T.MD, 0))
 
     # ------------------------------------------------------------------
     def _build_sources(self, parent):
@@ -423,6 +449,11 @@ class RecorderApp:
         self.transcript.append(f"\n[ERROR] {event.message}\n")
         self.status.set("processing failed", T.DANGER)
         self._reset_controls()
+        if self._unfinished:
+            # A failed run leaves its recorded tracks behind on purpose.
+            self.transcript.append(
+                "The recorded tracks were kept. Once the problem is fixed, "
+                "'Recover…' on the Recorder tab processes them again.\n")
         messagebox.showerror("Error", event.message)
 
     # ==================================================================
@@ -545,7 +576,8 @@ class RecorderApp:
     def _begin_recording(self):
         self._sync_settings_from_ui()
         base_name = self._resolve_output_conflict(
-            paths.safe_output_name(self.filename_entry.get()))
+            paths.safe_output_name(self.filename_entry.get()),
+            paths.output_extensions(self.settings.keep_raw_tracks))
         if base_name is None:                       # the user cancelled
             self._allow_new_work()
             return
@@ -638,12 +670,16 @@ class RecorderApp:
         if not recording.has_audio:
             if live is not None:
                 live.cancel()
+            recording.discard()          # empty files: nothing to recover later
             messagebox.showwarning("No data", "No audio data was captured.")
             self._reset_controls()
             return
 
+        self._start_finalizer(recording, self.recording_base_name, live=live)
+
+    def _start_finalizer(self, recording, base_name, live=None):
         self.finalizer = pipeline.Finalizer(self.bridge, self.settings, live=live)
-        self.finalizer.run_async(recording, self.recording_base_name)
+        self._work_thread = self.finalizer.run_async(recording, base_name)
 
     def upload_and_transcribe(self):
         # The button is disabled while a recording or any processing is under
@@ -684,21 +720,24 @@ class RecorderApp:
         self.transcript.append(f"Processing uploaded file: {os.path.basename(file_path)}\n")
 
         self.finalizer = pipeline.FileFinalizer(self.bridge, self.settings)
-        self.finalizer.run_async(file_path, base_name)
+        self._work_thread = self.finalizer.run_async(file_path, base_name)
 
     # ------------------------------------------------------------------
-    def _resolve_output_conflict(self, base_name):
+    def _resolve_output_conflict(self, base_name, extensions=None):
         """Ask before an existing recording is silently replaced.
 
-        Both output files are written as '<base_name>.wav' / '.txt', so a
-        second run under the same name used to overwrite the first one without
-        a word. Returns the base name to write to - possibly numbered or
-        renamed - or None when the user cancelled.
+        The output files are written as '<base_name>.wav' / '.txt' (and, for a
+        recording with "Keep raw tracks", '.mic.wav' / '.sys.wav'), so a second
+        run under the same name used to overwrite the first one without a word.
+        Returns the base name to write to - possibly numbered or renamed - or
+        None when the user cancelled.
         """
         out_dir = self.settings.get_output_dir()
-        if not paths.existing_outputs(out_dir, base_name):
+        if not paths.existing_outputs(out_dir, base_name,
+                                      extensions or paths.OUTPUT_EXTENSIONS):
             return base_name
-        return dialogs.ask_output_conflict(self.root, out_dir, base_name)
+        return dialogs.ask_output_conflict(self.root, out_dir, base_name,
+                                           extensions)
 
     def _apply_base_name(self, base_name):
         """Show the name that is actually going to be written on disk."""
@@ -722,6 +761,93 @@ class RecorderApp:
         self.timer_label.config(text="00:00", fg=T.TEXT_MUTE)
         self.mic_meter.reset()
         self.sys_meter.reset()
+        # The run is over once Finished / Failed arrives, even if its thread is
+        # still tidying up for a moment - and only now can the check for
+        # leftover recordings tell a failed run from one in progress.
+        self._work_thread = None
+        self._processing_base = None
+        self._refresh_recovery_banner()
+
+    # ==================================================================
+    # Recordings that were interrupted
+    # ==================================================================
+    def _busy_with_work(self):
+        thread = self._work_thread
+        return self.engine.is_recording or (thread is not None and thread.is_alive())
+
+    def _in_use(self):
+        """Raw-track names of the recording being made or processed right now."""
+        if not self._busy_with_work():
+            return set()
+        return {name for name in (self.recording_base_name, self._processing_base)
+                if name}
+
+    def _refresh_recovery_banner(self):
+        """Show the banner while recordings are waiting that nothing works on."""
+        found = capture.find_unfinished(paths.TMP_DIR, exclude=self._in_use())
+        self._unfinished = found
+        if not found or self._busy_with_work():
+            self.recovery_banner.pack_forget()
+            return
+        first = found[0]
+        more = f" and {len(found) - 1} more" if len(found) > 1 else ""
+        self.recovery_label.config(
+            text=f"⚠ Unfinished recording: {_shorten(first.base_name)} "
+                 f"({format_clock(first.duration_s)}){more}")
+        self.recovery_banner.pack(fill=tk.X, pady=(0, T.SM),
+                                  before=self.sources_card)
+
+    def offer_recovery(self):
+        """Ask what to do with the newest interrupted recording.
+
+        Called shortly after start-up and by the banner's button. Does nothing
+        while a recording is being made or processed.
+        """
+        if self._shutting_down or self._busy_with_work():
+            return
+        self._refresh_recovery_banner()
+        if not self._unfinished:
+            return
+        newest = self._unfinished[0]
+        choice = dialogs.ask_recovery(self.root, newest,
+                                      more=len(self._unfinished) - 1)
+        if choice == "process":
+            self._process_unfinished(newest)
+        elif choice == "delete":
+            self._delete_unfinished(newest)
+
+    def _process_unfinished(self, unfinished):
+        self._sync_settings_from_ui()
+        base_name = self._resolve_output_conflict(
+            paths.safe_output_name(unfinished.base_name),
+            paths.output_extensions(self.settings.keep_raw_tracks))
+        if base_name is None:                       # the user cancelled
+            return
+
+        self.start_btn.config(state="disabled")
+        self.upload_btn.config(state="disabled")
+        self.stop_btn.config(state="disabled")
+        self.mic_combo.config(state="disabled")
+        self.sys_combo.config(state="disabled")
+        self.recovery_banner.pack_forget()
+        self.status.set("processing recovered recording…", T.WARN)
+        self.transcript.clear()
+        self.transcript.append(
+            f"Processing the recovered recording '{unfinished.base_name}'…\n")
+
+        self.recording_base_name = base_name
+        self._processing_base = unfinished.base_name
+        self._start_finalizer(capture.recording_from_unfinished(unfinished),
+                              base_name)
+
+    def _delete_unfinished(self, unfinished):
+        if not messagebox.askyesno(
+                "Delete recording",
+                f"Delete the recorded tracks of '{unfinished.base_name}'?\n\n"
+                f"This cannot be undone.", icon="warning"):
+            return
+        capture.remove_unfinished(unfinished)
+        self._refresh_recovery_banner()
 
 
     # ==================================================================
@@ -858,7 +984,20 @@ class RecorderApp:
     # ==================================================================
     # Shutdown
     # ==================================================================
+    def _confirm_quit(self):
+        """Closing the window mid-recording used to discard it without a word."""
+        if self.engine.is_recording:
+            what = "A recording is running. Quitting now stops it without a transcript."
+        else:
+            what = "A recording is still being processed. Quitting now cancels that."
+        return messagebox.askyesno(
+            "Quit now?",
+            f"{what}\n\nThe recorded tracks are kept, and the next start "
+            f"offers to process them. Quit anyway?", icon="warning")
+
     def on_close(self):
+        if self._busy_with_work() and not self._confirm_quit():
+            return
         self._shutting_down = True
         if self._meter_after_id is not None:
             try:
@@ -907,3 +1046,7 @@ def _index_of(choices, value):
         if code == value:
             return index
     return 0
+
+
+def _shorten(name, limit=40):
+    return name if len(name) <= limit else name[:limit - 1] + "…"

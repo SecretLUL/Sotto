@@ -118,6 +118,26 @@ LEGACY_ITEMS = ("settings.json", "bin", "output")
 # Both files are overwritten without asking unless the caller checks first.
 OUTPUT_EXTENSIONS = (".wav", ".txt")
 
+# What "Keep raw tracks" adds for a recording: the unmixed microphone and system
+# tracks at their native sample rate, for a DAW or an editor.
+RAW_TRACK_EXTENSIONS = (".mic.wav", ".sys.wav")
+
+
+def raw_track_path(out_dir, base_name, kind):
+    """Where a kept raw track goes: <out_dir>/<base_name>.mic.wav or .sys.wav."""
+    return os.path.join(out_dir, f"{base_name}.{kind}.wav")
+
+
+def output_extensions(keep_raw_tracks=False):
+    """Every file a recording run writes under its base name.
+
+    Uploads write the first two only; a recording with "Keep raw tracks" on
+    writes the raw tracks as well, and the overwrite check has to know.
+    """
+    if keep_raw_tracks:
+        return OUTPUT_EXTENSIONS + RAW_TRACK_EXTENSIONS
+    return OUTPUT_EXTENSIONS
+
 # A base name that already carries a counter: 'my_meeting_2' -> ('my_meeting', 2)
 _NUMBERED_RE = re.compile(r"^(?P<stem>.+)_(?P<number>\d+)$")
 

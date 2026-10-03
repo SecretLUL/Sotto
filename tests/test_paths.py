@@ -74,6 +74,35 @@ class TestReservedDeviceNames(unittest.TestCase):
                 self.assertEqual(paths.safe_output_name(raw), raw)
 
 
+class TestRawTrackNames(unittest.TestCase):
+    """What a recording writes, so the overwrite check knows about all of it."""
+
+    def test_an_upload_writes_two_files_a_recording_with_raw_tracks_four(self):
+        self.assertEqual(paths.output_extensions(), (".wav", ".txt"))
+        self.assertEqual(paths.output_extensions(keep_raw_tracks=True),
+                         (".wav", ".txt", ".mic.wav", ".sys.wav"))
+
+    def test_raw_tracks_sit_next_to_the_transcript(self):
+        self.assertEqual(
+            paths.raw_track_path("out", "Meeting 03.10.2026", "sys"),
+            os.path.join("out", "Meeting 03.10.2026.sys.wav"))
+
+    def test_a_free_number_has_to_clear_the_raw_tracks_too(self):
+        folder = tempfile.mkdtemp()
+        try:
+            for name in ("my_meeting.wav", "my_meeting_2.mic.wav"):
+                with open(os.path.join(folder, name), "wb"):
+                    pass
+            self.assertEqual(paths.next_free_name(folder, "my_meeting"),
+                             "my_meeting_2")
+            self.assertEqual(
+                paths.next_free_name(folder, "my_meeting",
+                                     paths.output_extensions(True)),
+                "my_meeting_3")
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+
 class TestScratchName(unittest.TestCase):
     """whisper-cli cannot open files named in Turkish or Arabic (ANSI argv)."""
 
