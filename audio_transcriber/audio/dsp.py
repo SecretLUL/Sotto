@@ -115,6 +115,29 @@ def frame_rms(x, frame_len):
     return np.sqrt(np.mean(np.square(frames, dtype=np.float64), axis=1)).astype(np.float32)
 
 
+def quietest_split(x, rate, earliest, latest, frame_s=0.05):
+    """Sample index in [earliest, latest] with the least energy.
+
+    Live transcription has to cut the running recording into chunks somewhere.
+    Cutting through a word costs that word in both chunks, cutting into a pause
+    costs nothing - so the boundary is moved to the quietest 50 ms of the
+    search range instead of landing on a fixed sample number.
+
+    Falls back to `latest` when the range is too short to search.
+    """
+    x = np.asarray(x, dtype=np.float32)
+    earliest = max(0, int(earliest))
+    latest = min(len(x), int(latest))
+    frame = max(1, int(rate * frame_s))
+    if latest - earliest < 2 * frame:
+        return latest
+
+    levels = frame_rms(x[earliest:latest], frame)
+    if levels.size == 0:
+        return latest
+    return earliest + int(np.argmin(levels)) * frame + frame // 2
+
+
 def reference_level(x, rate=TARGET_RATE, percentile=95.0):
     """Typical speech level of a track: percentile of the 100 ms frame RMS.
 
@@ -167,18 +190,24 @@ def limit_peak(x, ceiling=0.95):
     return x
 
 
-def normalize_for_asr(x, target_rms=0.06, ceiling=0.95):
+def normalize_for_asr(x, target_rms=0.06, ceiling=0.95, reference=None):
     """Bring a track to an even level for speech recognition.
 
     whisper performs noticeably worse on very quiet material. Because both
     tracks are transcribed separately, each may be normalised independently -
     unlike in the previous version this no longer affects speaker attribution,
     which works on levels relative to each track.
+
+    `reference` overrides the level this piece is measured against. Pass the
+    whole track's reference when normalising a section of it: a short quiet
+    excerpt measured on its own gets the full +32 dB, which lifts room noise
+    to speech level - and whisper answers amplified noise with hallucinations.
     """
     x = np.asarray(x, dtype=np.float32)
     if x.size == 0:
         return x
-    reference = reference_level(x)
+    if reference is None:
+        reference = reference_level(x)
     if reference <= SILENCE_FLOOR:
         return x
     factor = min(target_rms / reference, 40.0)   # at most +32 dB, else noise

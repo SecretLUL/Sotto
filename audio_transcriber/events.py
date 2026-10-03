@@ -42,8 +42,9 @@ class Progress:
 
 @dataclass(frozen=True)
 class LivePreview:
-    """Intermediate live transcription result (display only)."""
+    """Intermediate transcription result while recording (display only)."""
     text: str
+    header: str = ""
 
 
 @dataclass(frozen=True)

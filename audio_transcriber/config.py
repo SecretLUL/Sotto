@@ -53,7 +53,10 @@ class Settings:
     # than the small gain against hallucinations, which diarize.py filters
     # out energy-wise anyway.
     use_vad: bool = False
-    live_transcribe: bool = True    # preview only, never the final result
+    # Recognise while recording, so stopping only has to catch up with the
+    # tail. Local models only - see pipeline.live_transcription_possible().
+    live_transcribe: bool = True
+    live_preview: bool = True       # show the running text while recording
     elevenlabs_model_id: str = "scribe_v2"
 
     # --- Output -----------------------------------------------------------
