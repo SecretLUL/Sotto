@@ -40,6 +40,15 @@ METER_INTERVAL_MS = 40
 # its reader threads with a 2 s timeout each, so this leaves room for both.
 DEVICE_READY_TIMEOUT_S = 6.0
 
+# What the key field says about its key. The second is for systems without the
+# Windows DPAPI, where the key cannot be stored at all - the hint used to claim
+# the encryption there as well.
+KEY_HINT_STORED = ("Encrypted with the Windows DPAPI and bound to your user "
+                   "account — never stored in clear text.")
+KEY_HINT_SESSION = ("This system has no secure place for the key, so it is kept "
+                    "only until you close the app. Set the ELEVENLABS_API_KEY "
+                    "environment variable to keep it.")
+
 
 class RecorderApp:
     def __init__(self, root):
@@ -78,7 +87,7 @@ class RecorderApp:
 
         for warning in warnings:
             self.transcript.append(f"⚠ {warning}\n")
-        if self.settings.migrated_plaintext_key:
+        if self.settings.migrated_plaintext_key and config.key_can_be_stored():
             self.transcript.append(
                 "→ The key will be stored encrypted the next time you save.\n\n")
 
@@ -255,8 +264,8 @@ class RecorderApp:
             key_wrap, "ElevenLabs API key",
             lambda p: ttk.Entry(p, show="•", style="Dark.TEntry",
                                 font=T.fonts["body"]),
-            hint="Encrypted with the Windows DPAPI and bound to your user "
-                 "account — never stored in clear text.", icon_name="lock")
+            hint=KEY_HINT_STORED if config.key_can_be_stored() else KEY_HINT_SESSION,
+            icon_name="lock")
         self.key_field.grid(row=0, column=0, sticky="ew")
         self.api_entry = self.key_field.widget
         self.api_entry.insert(0, self.settings.api_key)
@@ -898,11 +907,17 @@ class RecorderApp:
     def save_settings(self):
         self._sync_settings_from_ui()
         try:
-            config.save(self.settings)
+            warnings = config.save(self.settings)
         except Exception as exc:
             messagebox.showerror("Error", f"Settings could not be saved:\n{exc}")
             return
         self.settings.migrated_plaintext_key = False
+        if warnings:
+            # Pressed 'Save' and something did not get saved: say so where the
+            # user is looking, not in a log on another tab.
+            self.status.set("settings saved, with a warning", T.WARN)
+            messagebox.showwarning("Settings saved", "\n\n".join(warnings))
+            return
         self.status.set("settings saved", T.OK)
 
     def _refresh_key_state(self):

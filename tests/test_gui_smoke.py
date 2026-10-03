@@ -484,6 +484,97 @@ class TestControlStates(unittest.TestCase):
         self.assertIsNot(worker.call_args[0][1], self.app.settings)
 
 
+@unittest.skipUnless(_can_open_window(), "no graphical display available")
+class TestApiKeyHonesty(unittest.TestCase):
+    """What the window says about the key must be true on this system."""
+
+    def setUp(self):
+        from unittest.mock import patch
+        from audio_transcriber import config
+        from audio_transcriber.audio.capture import AudioEngine
+        from audio_transcriber.ui import icons
+
+        icons._ICON_CACHE.clear()
+        self.out_dir = tempfile.mkdtemp()
+        settings = config.Settings(output_dir=self.out_dir, live_transcribe=False,
+                                   live_preview=False)
+        self.patches = [
+            patch.object(config, "load", return_value=(settings, [])),
+            patch.object(AudioEngine, "configure", return_value=[]),
+        ]
+        for patcher in self.patches:
+            patcher.start()
+        self.app = None
+
+    def tearDown(self):
+        import shutil
+        from audio_transcriber.ui import icons
+        if self.app is not None:
+            self.app.on_close()
+        for patcher in self.patches:
+            patcher.stop()
+        icons._ICON_CACHE.clear()
+        shutil.rmtree(self.out_dir, ignore_errors=True)
+
+    def _build(self, can_store):
+        from unittest.mock import patch
+        from audio_transcriber import config
+        from audio_transcriber.ui.app import RecorderApp
+        with patch.object(config, "key_can_be_stored", return_value=can_store):
+            self.root = tk.Tk()
+            self.root.withdraw()
+            self.app = RecorderApp(self.root)
+        self.app._monitor_thread = None
+        return self.app
+
+    def _labels(self, widget):
+        found = []
+
+        def collect(item):
+            if isinstance(item, tk.Label):
+                found.append(str(item.cget("text")))
+            for child in item.winfo_children():
+                collect(child)
+
+        collect(widget)
+        return " ".join(found)
+
+    def test_where_the_key_is_encrypted_the_hint_says_how(self):
+        text = self._labels(self._build(can_store=True).key_field)
+        self.assertIn("DPAPI", text)
+        self.assertNotIn("until you close the app", text)
+
+    def test_where_it_cannot_be_the_hint_does_not_claim_encryption(self):
+        text = self._labels(self._build(can_store=False).key_field)
+        self.assertNotIn("DPAPI", text)
+        self.assertNotIn("Encrypted", text)
+        self.assertIn("until you close the app", text)
+        self.assertIn("ELEVENLABS_API_KEY", text)
+
+    def test_saving_a_key_that_could_not_be_kept_tells_the_user(self):
+        from unittest.mock import patch
+        from audio_transcriber import config
+        app = self._build(can_store=False)
+        note = "The API key was not saved: this system has no secure storage for it."
+        with patch.object(config, "save", return_value=[note]), \
+                patch("audio_transcriber.ui.app.messagebox") as box:
+            app.save_settings()
+
+        box.showwarning.assert_called_once()
+        self.assertIn(note, box.showwarning.call_args[0][1])
+        self.assertNotEqual(app.status._text, "settings saved")
+
+    def test_a_plain_save_is_still_just_a_save(self):
+        from unittest.mock import patch
+        from audio_transcriber import config
+        app = self._build(can_store=True)
+        with patch.object(config, "save", return_value=[]), \
+                patch("audio_transcriber.ui.app.messagebox") as box:
+            app.save_settings()
+        box.showwarning.assert_not_called()
+        self.assertEqual(app.status._text, "settings saved")
+
+
 def _make_raw_tracks(folder, base, kinds=("mic", "sys"), seconds=2.0, rate=16000):
     """Raw track files the way the capture engine leaves them behind."""
     import numpy as np

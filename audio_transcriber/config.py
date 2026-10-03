@@ -218,9 +218,14 @@ def load(path=None):
     if legacy and not settings.api_key:
         settings.api_key = legacy
         settings.migrated_plaintext_key = True
+        if key_can_be_stored():
+            fate = "has been adopted and will be encrypted the next time you save"
+        else:
+            fate = ("has been adopted for this session only: this system cannot "
+                    "encrypt it, so saving removes the clear-text copy and the "
+                    "key is gone - set ELEVENLABS_API_KEY to keep it")
         warnings.append(
-            "The API key was stored in clear text in settings.json. It has "
-            "been adopted and will be encrypted the next time you save. "
+            f"The API key was stored in clear text in settings.json. It {fate}. "
             "IMPORTANT: revoke that key in the ElevenLabs dashboard and issue "
             "a new one - the old value sat unprotected on disk."
         )
@@ -244,30 +249,47 @@ def _read_model(settings, raw, warnings):
         settings.model = DEFAULT_MODEL
 
 
+def key_can_be_stored():
+    """Whether this system has a secure place for the API key (DPAPI)."""
+    return secretstore.is_available()
+
+
 def save(settings, path=None):
     """Save atomically. The key is never written in clear text.
 
     A key that merely came from ELEVENLABS_API_KEY is not written at all: the
     stored copy would win over the variable from then on, so rotating the
     variable would silently change nothing.
+
+    Returns a list of warnings, empty when everything was stored. A key that
+    could not be secured is left out of the file - and that has to be said: it
+    used to vanish at the next start without a word.
     """
     path = CFG_PATH if path is None else path
+    warnings = []
     data = asdict(settings)
     data.pop("api_key", None)
     data.pop("migrated_plaintext_key", None)
     data["schema_version"] = SCHEMA_VERSION
 
+    data["elevenlabs_api_key_enc"] = ""
     if settings.api_key and settings.api_key != secretstore.from_environment():
         try:
             data["elevenlabs_api_key_enc"] = secretstore.encrypt(settings.api_key)
-        except OSError:
-            # No DPAPI (e.g. non-Windows): store nothing rather than clear
-            # text. Users can set ELEVENLABS_API_KEY instead.
-            data["elevenlabs_api_key_enc"] = ""
-    else:
-        data["elevenlabs_api_key_enc"] = ""
+        except OSError as exc:
+            # Store nothing rather than clear text.
+            if key_can_be_stored():
+                warnings.append(f"The API key could not be encrypted ({exc}) and "
+                                f"was not saved. It stays in use until you "
+                                f"close the app.")
+            else:
+                warnings.append("The API key was not saved: this system has no "
+                                "secure storage for it. It stays in use until "
+                                "you close the app; set the ELEVENLABS_API_KEY "
+                                "environment variable to keep it.")
 
     tmp_path = path + ".tmp"
     with open(tmp_path, "w", encoding="utf-8") as handle:
         json.dump(data, handle, indent=4, ensure_ascii=False)
     os.replace(tmp_path, path)   # atomic: never a half-written settings.json
+    return warnings

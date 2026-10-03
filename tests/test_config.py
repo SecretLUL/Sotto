@@ -301,6 +301,99 @@ class TestModelSelection(unittest.TestCase):
         self.assertEqual(config.Settings(whisper_threads=6).threads(), 6)
 
 
+class TestKeyStorageIsHonest(unittest.TestCase):
+    """A key that cannot be stored must not look as if it had been.
+
+    Without DPAPI (Linux, macOS) save() wrote an empty value and said nothing:
+    the key was gone at the next start, and the window claimed it was
+    'encrypted with the Windows DPAPI'.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.dir, "settings.json")
+        patcher = patch.dict(os.environ)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop("ELEVENLABS_API_KEY", None)
+
+    def tearDown(self):
+        for name in os.listdir(self.dir):
+            os.remove(os.path.join(self.dir, name))
+        os.rmdir(self.dir)
+
+    def _with_key(self):
+        settings = config.Settings()
+        settings.api_key = SAMPLE_KEY
+        return settings
+
+    def _file(self):
+        with open(self.path, encoding="utf-8") as handle:
+            return handle.read()
+
+    def test_without_secure_storage_the_key_is_not_written_and_save_says_so(self):
+        settings = self._with_key()
+        with patch.object(secretstore, "_IS_WINDOWS", False):       # Linux, macOS
+            warnings = config.save(settings, self.path)
+
+        self.assertEqual(json.loads(self._file())["elevenlabs_api_key_enc"], "")
+        self.assertNotIn(SAMPLE_KEY, self._file())
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("not saved", warnings[0])
+        self.assertIn("ELEVENLABS_API_KEY", warnings[0])
+        self.assertEqual(settings.api_key, SAMPLE_KEY, "still usable in this session")
+
+    def test_a_dpapi_call_that_fails_is_reported_too(self):
+        with patch.object(secretstore, "_IS_WINDOWS", True), \
+                patch.object(secretstore, "encrypt",
+                             side_effect=OSError("CryptProtectData failed")):
+            warnings = config.save(self._with_key(), self.path)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("could not be encrypted", warnings[0])
+        self.assertIn("CryptProtectData failed", warnings[0])
+        self.assertNotIn(SAMPLE_KEY, self._file())
+
+    def test_a_key_that_was_stored_needs_no_warning(self):
+        with patch.object(secretstore, "encrypt", return_value="TOKEN"):
+            warnings = config.save(self._with_key(), self.path)
+        self.assertEqual(warnings, [])
+        self.assertEqual(json.loads(self._file())["elevenlabs_api_key_enc"], "TOKEN")
+
+    def test_a_key_that_comes_from_the_environment_needs_none_either(self):
+        os.environ["ELEVENLABS_API_KEY"] = "env-key-123"
+        with patch.object(secretstore, "_IS_WINDOWS", False):
+            settings, _warnings = config.load(self.path)
+            self.assertEqual(config.save(settings, self.path), [])
+
+    def test_the_clear_text_key_of_an_old_file_is_not_promised_encryption_it_cannot_get(self):
+        old_file = {"elevenlabs_api_key": SAMPLE_KEY}
+        with open(self.path, "w", encoding="utf-8") as handle:
+            json.dump(old_file, handle)
+
+        with patch.object(secretstore, "_IS_WINDOWS", True):
+            _settings, warnings = config.load(self.path)
+        self.assertIn("will be encrypted", " ".join(warnings))
+
+        with patch.object(secretstore, "_IS_WINDOWS", False):
+            settings, warnings = config.load(self.path)
+        text = " ".join(warnings)
+        self.assertNotIn("will be encrypted", text)
+        self.assertIn("this session only", text)
+        self.assertIn("ELEVENLABS_API_KEY", text)
+        self.assertIn("revoke", text, "the exposed key still has to be replaced")
+        self.assertEqual(settings.api_key, SAMPLE_KEY)
+
+    def test_no_key_no_warning(self):
+        with patch.object(secretstore, "_IS_WINDOWS", False):
+            self.assertEqual(config.save(config.Settings(), self.path), [])
+
+    def test_the_window_can_ask_whether_a_key_can_be_kept(self):
+        with patch.object(secretstore, "_IS_WINDOWS", False):
+            self.assertFalse(config.key_can_be_stored())
+        with patch.object(secretstore, "_IS_WINDOWS", True):
+            self.assertTrue(config.key_can_be_stored())
+
+
 class TestSettingsSnapshot(unittest.TestCase):
     """A run works on a copy: the window goes on changing the live settings
     (the gain sliders, 'Save settings') while a transcription is under way."""
