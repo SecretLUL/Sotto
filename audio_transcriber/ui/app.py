@@ -508,8 +508,12 @@ class RecorderApp:
             return
 
         # Disable straight away so F5 or a second click cannot start twice
-        # while we are still waiting for the devices.
+        # while we are still waiting for the devices. Upload goes with it: it
+        # runs its own pipeline and takes over the buttons and the transcript,
+        # which must not happen while a recording is on its way, being made or
+        # processed. _reset_controls() lets both go again.
         self.start_btn.config(state="disabled")
+        self.upload_btn.config(state="disabled")
         self._start_deadline = time.monotonic() + DEVICE_READY_TIMEOUT_S
         self._start_when_devices_ready()
 
@@ -543,8 +547,7 @@ class RecorderApp:
         base_name = self._resolve_output_conflict(
             paths.safe_output_name(self.filename_entry.get()))
         if base_name is None:                       # the user cancelled
-            self.start_btn.config(state="normal")
-            self.status.set("ready", T.TEXT_MUTE)
+            self._allow_new_work()
             return
         self._apply_base_name(base_name)
 
@@ -557,8 +560,7 @@ class RecorderApp:
             self.engine.start_recording(base_name)
         except RuntimeError as exc:
             self._stop_live()
-            self.start_btn.config(state="normal")
-            self.status.set("ready", T.TEXT_MUTE)
+            self._allow_new_work()
             messagebox.showerror("Cannot record", str(exc))
             return
 
@@ -644,7 +646,9 @@ class RecorderApp:
         self.finalizer.run_async(recording, self.recording_base_name)
 
     def upload_and_transcribe(self):
-        if self.engine.is_recording:
+        # The button is disabled while a recording or any processing is under
+        # way; the check keeps a direct call from slipping past it.
+        if self.engine.is_recording or str(self.upload_btn["state"]) == "disabled":
             return
 
         file_types = [
@@ -701,6 +705,12 @@ class RecorderApp:
         self.filename_entry.delete(0, tk.END)
         self.filename_entry.insert(0, base_name)
         self.settings.filename = base_name
+
+    def _allow_new_work(self):
+        """Back to idle after a start that came to nothing (cancelled, refused)."""
+        self.start_btn.config(state="normal")
+        self.upload_btn.config(state="normal")
+        self.status.set("ready", T.TEXT_MUTE)
 
     def _reset_controls(self):
         self.start_btn.config(state="normal")
