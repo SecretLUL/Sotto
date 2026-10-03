@@ -133,7 +133,7 @@ class WhisperCppBackend(Backend):
             )
         except OSError as exc:
             raise TranscriptionError(
-                f"whisper-cli.exe could not be started: {exc}") from exc
+                f"{os.path.basename(exe)} could not be started: {exc}") from exc
 
         with self._lock:
             self._proc = proc

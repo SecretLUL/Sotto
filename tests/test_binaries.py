@@ -151,7 +151,9 @@ class TestConcurrentAndCancelledDownloads(unittest.TestCase):
                 outcomes.append(exc)
 
         with _Server() as base:
-            with patch.object(binaries, "model_path", lambda _name: target), \
+            # Fake bytes under a real model name: the pinned hash must not apply.
+            with patch.dict(binaries.EXPECTED_SHA256, {}, clear=True), \
+                    patch.object(binaries, "model_path", lambda _name: target), \
                     patch.object(binaries, "MODEL_URL_TEMPLATE", base + "/big-{name}"):
                 threads = [threading.Thread(target=ask) for _ in range(2)]
                 for thread in threads:
@@ -205,6 +207,128 @@ class TestConcurrentAndCancelledDownloads(unittest.TestCase):
                 patch.object(binaries, "download") as download:
             self.assertEqual(binaries.ensure_model("tiny"), target)
         download.assert_not_called()
+
+
+class TestPinnedDownloads(unittest.TestCase):
+    """What is downloaded - and in one case executed - is pinned and verified."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_every_model_the_app_offers_has_a_pinned_hash(self):
+        from audio_transcriber import config
+        names = [name for _label, name in config.MODEL_CHOICES if name]
+        for name in names:
+            with self.subTest(model=name):
+                self.assertIn(f"ggml-{name}.bin", binaries.EXPECTED_SHA256)
+
+    def test_the_hashes_look_like_sha256(self):
+        self.assertIn("whisper-vulkan.zip", binaries.EXPECTED_SHA256)
+        self.assertIn("ggml-silero-v5.1.2.bin", binaries.EXPECTED_SHA256)
+        for name, digest in binaries.EXPECTED_SHA256.items():
+            with self.subTest(file=name):
+                self.assertRegex(digest, r"^[0-9a-f]{64}$")
+
+    def test_the_urls_name_a_revision_not_a_moving_branch(self):
+        for url in (binaries.MODEL_URL_TEMPLATE, binaries.VAD_MODEL_URL):
+            with self.subTest(url=url):
+                self.assertRegex(url, r"/resolve/[0-9a-f]{40}/")
+                self.assertNotIn("/resolve/main/", url)
+
+    def test_a_download_with_the_right_checksum_is_accepted(self):
+        import hashlib
+        dest = os.path.join(self.dir, "model.bin")
+        good = hashlib.sha256(PAYLOAD).hexdigest()
+        with patch.dict(binaries.EXPECTED_SHA256, {"model.bin": good}):
+            with _Server() as base:
+                binaries.download(f"{base}/ok", dest, "Test file")
+        self.assertEqual(os.path.getsize(dest), len(PAYLOAD))
+
+    def test_a_download_with_a_wrong_checksum_is_rejected_and_leaves_nothing(self):
+        """The checksum check existed but the table was empty, so a tampered or
+        damaged model - or the executable fetched for Windows - passed."""
+        dest = os.path.join(self.dir, "model.bin")
+        with patch.dict(binaries.EXPECTED_SHA256, {"model.bin": "0" * 64}):
+            with _Server() as base:
+                with self.assertRaises(binaries.DownloadError) as ctx:
+                    binaries.download(f"{base}/ok", dest, "Test file")
+        self.assertIn("Checksum mismatch", str(ctx.exception))
+        self.assertFalse(os.path.exists(dest))
+        self.assertFalse(os.path.exists(dest + ".part"))
+
+
+class TestFindingWhisper(unittest.TestCase):
+    """Only Windows gets a whisper-cli downloaded; elsewhere it has to exist."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.exe = os.path.join(self.dir, "whisper-cli")
+        self.patches = [patch.object(binaries, "WHISPER_EXE", self.exe),
+                        patch.object(binaries, "BIN_DIR", self.dir)]
+        for patcher in self.patches:
+            patcher.start()
+
+    def tearDown(self):
+        for patcher in self.patches:
+            patcher.stop()
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _touch_exe(self):
+        with open(self.exe, "wb"):
+            pass
+
+    @staticmethod
+    def _which(*available):
+        return lambda name: f"/usr/bin/{name}" if name in available else None
+
+    def test_the_program_in_bin_wins_everywhere(self):
+        self._touch_exe()
+        for windows in (True, False):
+            with self.subTest(windows=windows):
+                self.assertEqual(
+                    binaries.find_whisper_executable(
+                        which=self._which("whisper-cli"), windows=windows),
+                    self.exe)
+
+    def test_windows_does_not_look_on_the_path(self):
+        self.assertIsNone(binaries.find_whisper_executable(
+            which=self._which("whisper-cli"), windows=True))
+
+    def test_elsewhere_the_path_is_searched(self):
+        self.assertEqual(
+            binaries.find_whisper_executable(which=self._which("whisper-cli"),
+                                             windows=False),
+            "/usr/bin/whisper-cli")
+        self.assertEqual(
+            binaries.find_whisper_executable(which=self._which("whisper-cpp"),
+                                             windows=False),
+            "/usr/bin/whisper-cpp")
+        self.assertIsNone(binaries.find_whisper_executable(
+            which=self._which(), windows=False))
+
+    def test_a_missing_program_is_reported_before_recording_not_after(self):
+        self.assertIsNone(binaries.local_engine_problem(which=self._which(),
+                                                        windows=True))
+        self.assertIsNone(binaries.local_engine_problem(
+            which=self._which("whisper-cli"), windows=False))
+        problem = binaries.local_engine_problem(which=self._which(), windows=False)
+        self.assertIn("brew install whisper-cpp", problem)
+        self.assertIn(self.dir, problem)
+        self.assertIn("ElevenLabs", problem)
+
+    def test_nothing_is_downloaded_where_only_a_windows_build_exists(self):
+        """It used to fetch the Windows archive on Linux and macOS, 'succeed',
+        and then fail to start the .exe."""
+        with patch.object(binaries, "_IS_WINDOWS", False), \
+                patch.object(binaries, "find_whisper_executable", return_value=None), \
+                patch.object(binaries, "download") as download:
+            with self.assertRaises(binaries.DownloadError) as ctx:
+                binaries.ensure_whisper_binary()
+        download.assert_not_called()
+        self.assertIn("brew install whisper-cpp", str(ctx.exception))
 
 
 class TestSafeExtract(unittest.TestCase):

@@ -109,7 +109,10 @@ TMP_DIR = os.path.join(OUT_DIR, ".tmp")
 CFG_PATH = os.path.join(DATA_DIR, "settings.json")
 LOG_PATH = os.path.join(DATA_DIR, "recorder.log")
 
-WHISPER_EXE = os.path.join(BIN_DIR, "whisper-cli.exe")
+# Where a whisper-cli that was put into bin/ is expected. Only Windows gets one
+# downloaded there (transcribe/binaries.py).
+WHISPER_EXE = os.path.join(BIN_DIR, "whisper-cli.exe" if os.name == "nt"
+                           else "whisper-cli")
 
 # What a packaged build used to keep inside PyInstaller's _internal folder.
 LEGACY_ITEMS = ("settings.json", "bin", "output")

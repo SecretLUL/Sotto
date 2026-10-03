@@ -13,6 +13,7 @@ Fixes H8 and M2:
 import hashlib
 import http.client
 import os
+import shutil
 import threading
 import time
 import urllib.error
@@ -24,11 +25,24 @@ from ..paths import BIN_DIR, WHISPER_EXE, model_path
 USER_AGENT = "AudioTranscriber/2.0 (+local)"
 CONNECT_TIMEOUT = 30
 
+_IS_WINDOWS = os.name == "nt"
+
+# The only prebuilt whisper.cpp this app knows is the Windows (Vulkan) one below,
+# a third-party build of the upstream project. It is executed after download,
+# so it is pinned to the exact archive: GitHub's digest for that release asset
+# (created 2026-06-20, not modified since).
 WHISPER_ZIP_URL = ("https://github.com/lemonade-sdk/whisper.cpp-rocm/releases/"
                    "download/v1.8.4/whisper-v1.8.4-windows-vulkan-x64.zip")
-MODEL_URL_TEMPLATE = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{name}.bin"
-VAD_MODEL_URL = ("https://huggingface.co/ggml-org/whisper-vad/resolve/main/"
-                 "ggml-silero-v5.1.2.bin")
+
+# The model repositories are pinned to the revision the hashes below belong to.
+# A branch name moves; a revision keeps serving exactly these files, so a
+# checksum failure means a damaged or tampered download, not "upstream changed".
+WHISPER_MODELS_REVISION = "5359861c739e955e79d9a303bcbc70fb988958b1"  # ggerganov/whisper.cpp
+VAD_REVISION = "9ffd54a1e1ee413ddf265af9913beaf518d1639b"             # ggml-org/whisper-vad
+MODEL_URL_TEMPLATE = ("https://huggingface.co/ggerganov/whisper.cpp/resolve/"
+                      + WHISPER_MODELS_REVISION + "/ggml-{name}.bin")
+VAD_MODEL_URL = ("https://huggingface.co/ggml-org/whisper-vad/resolve/"
+                 + VAD_REVISION + "/ggml-silero-v5.1.2.bin")
 VAD_MODEL_PATH = os.path.join(BIN_DIR, "ggml-silero-v5.1.2.bin")
 
 # Files kept from the release archive.
@@ -37,9 +51,36 @@ ESSENTIAL = {
     "ggml-cpu.dll", "ggml-vulkan.dll", "SDL2.dll",
 }
 
-# Optional integrity check. Add SHA-256 sums here to protect downloads against
-# tampering; empty means length verification only.
-EXPECTED_SHA256 = {}
+# SHA-256 of everything that is downloaded, keyed by the file name it is saved
+# under. The model hashes are the LFS object ids Hugging Face publishes for the
+# pinned revision; they also match the files an earlier version of this app had
+# downloaded. A file whose name is not listed is only checked for its length.
+EXPECTED_SHA256 = {
+    "whisper-vulkan.zip":
+        "e0d20a0f92e31b98adc0faf71172efc810b701e6391a9d858ca045bff26f77cd",
+    "ggml-tiny.bin":
+        "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21",
+    "ggml-base.bin":
+        "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",
+    "ggml-small.bin":
+        "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
+    "ggml-medium.bin":
+        "6c14d5adee5f86394037b4e4e8b59f1673b6cee10e3cf0b11bbdbee79c156208",
+    "ggml-large-v3-turbo.bin":
+        "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69",
+    "ggml-large-v3.bin":
+        "64d182b440b98d5203c4f9bd541544d84c605196c4f7b845dfa11fb23594d1e2",
+    "ggml-silero-v5.1.2.bin":
+        "29940d98d42b91fbd05ce489f3ecf7c72f0a42f027e4875919a28fb4c04ea2cf",
+}
+
+NO_WHISPER_HINT = (
+    "The local engine needs whisper.cpp's command-line program (whisper-cli), "
+    "which this app only downloads automatically on Windows. Install it - "
+    "macOS: 'brew install whisper-cpp'; Linux: build "
+    "https://github.com/ggml-org/whisper.cpp or use your distribution's "
+    "package - so that 'whisper-cli' is on the PATH, or copy it to "
+    "{bin_dir}. Or choose the ElevenLabs engine in the settings.")
 
 
 class DownloadError(RuntimeError):
@@ -174,10 +215,46 @@ def safe_extract(zip_path, dest_dir):
 
 
 # ----------------------------------------------------------------------
-def ensure_whisper_binary(progress=None, log=None, cancelled=None):
-    """Make sure whisper-cli.exe is present."""
+def find_whisper_executable(which=shutil.which, windows=None):
+    """The whisper.cpp command-line program that is available, or None.
+
+    Windows: the one in bin/ - fetched on demand by ensure_whisper_binary().
+    Elsewhere nothing is fetched (the only prebuilt build known here is a
+    Windows one), so: bin/whisper-cli if the user put one there, else
+    'whisper-cli' (Homebrew, a source build) or 'whisper-cpp' on the PATH.
+    """
+    windows = _IS_WINDOWS if windows is None else windows
     if os.path.exists(WHISPER_EXE):
         return WHISPER_EXE
+    if windows:
+        return None
+    for name in ("whisper-cli", "whisper-cpp"):
+        found = which(name)
+        if found:
+            return found
+    return None
+
+
+def local_engine_problem(which=shutil.which, windows=None):
+    """Why the local engine cannot run right now, or None if it can.
+
+    Windows can always fetch what is missing; elsewhere a missing whisper-cli
+    is the user's to install - and worth saying before a recording rather than
+    after it.
+    """
+    windows = _IS_WINDOWS if windows is None else windows
+    if windows or find_whisper_executable(which=which, windows=windows):
+        return None
+    return NO_WHISPER_HINT.format(bin_dir=BIN_DIR)
+
+
+def ensure_whisper_binary(progress=None, log=None, cancelled=None):
+    """Make sure whisper-cli (whisper-cli.exe on Windows) is available."""
+    found = find_whisper_executable()
+    if found:
+        return found
+    if not _IS_WINDOWS:
+        raise DownloadError(NO_WHISPER_HINT.format(bin_dir=BIN_DIR))
 
     # Check, lock, check again: whoever waited here finds it done afterwards.
     with _lock_for(WHISPER_EXE):
