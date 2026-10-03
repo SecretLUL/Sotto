@@ -580,7 +580,10 @@ class FileFinalizer:
 
     def run_async(self, file_path, base_name=None):
         if not base_name:
-            base_name = paths.safe_output_name(os.path.splitext(os.path.basename(file_path))[0])
+            # The full file name: safe_output_name() removes the one known
+            # extension itself. Stripping it here as well cut a second,
+            # dot-separated piece off 'Team Meeting 2026.03.10.wav'.
+            base_name = paths.safe_output_name(os.path.basename(file_path))
         thread = threading.Thread(target=self._run, args=(file_path, base_name),
                                   name="file-finalize", daemon=True)
         thread.start()

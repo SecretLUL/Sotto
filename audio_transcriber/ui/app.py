@@ -663,7 +663,7 @@ class RecorderApp:
             return
 
         self._sync_settings_from_ui()
-        file_basename = os.path.splitext(os.path.basename(file_path))[0]
+        file_basename = os.path.basename(file_path)   # safe_output_name drops the extension
         base_name = self._resolve_output_conflict(
             paths.safe_output_name(self.filename_entry.get() or file_basename))
         if base_name is None:                       # the user cancelled

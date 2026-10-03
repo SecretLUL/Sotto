@@ -27,6 +27,24 @@ OUTPUT_EXTENSIONS = (".wav", ".txt")
 # A base name that already carries a counter: 'my_meeting_2' -> ('my_meeting', 2)
 _NUMBERED_RE = re.compile(r"^(?P<stem>.+)_(?P<number>\d+)$")
 
+# Extensions that may come with a typed name or an uploaded file and must not
+# end up in the base name, because the app appends its own '.wav' / '.txt'.
+# A list on purpose: os.path.splitext() removes ANY trailing '.something', so
+# 'Meeting 03.10.2026' became 'Meeting 03.10' and 'v1.2 review' became 'v1'.
+_STRIPPED_EXTENSIONS = frozenset({
+    ".wav", ".txt", ".mp3", ".m4a", ".flac", ".ogg", ".aac", ".wma", ".mp4",
+    ".webm", ".opus", ".aiff", ".aif", ".m4b", ".amr", ".caf",
+})
+
+# Names Microsoft documents as devices, with or without an extension ('NUL.txt'
+# is equivalent to NUL). Whether a given Windows build still honours that
+# differs - 11 build 26200 writes an ordinary file - so this is a precaution
+# for the builds that do.
+_RESERVED_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"{device}{digit}" for device in ("COM", "LPT")
+       for digit in "123456789¹²³"})
+
 
 def ensure_dirs():
     """Create the working directories (idempotent)."""
@@ -49,14 +67,24 @@ def safe_output_name(user_input, default="my_meeting"):
     and a name written on Windows sanitised to something else entirely - the
     same settings.json produced a different file name depending on where it
     ran. The result is still safe either way, just not the same.
+
+    Pass the name as it was typed or as the file is called - extension
+    included. Exactly one known audio/transcript extension is removed; any
+    other dots belong to the name.
     """
     name = (user_input or "").strip()
     name = name.replace("\\", "/").rsplit("/", 1)[-1]
-    name = os.path.splitext(name)[0]
+    stem, extension = os.path.splitext(name)
+    if extension.lower() in _STRIPPED_EXTENSIONS:
+        name = stem
     # Strip characters Windows does not allow in file names
     for char in '<>:"/\\|?*':
         name = name.replace(char, "_")
     name = name.strip(" .")
+    # Reserved device names count by their first segment: 'aux.v2' is AUX too.
+    first, dot, rest = name.partition(".")
+    if first.rstrip().upper() in _RESERVED_NAMES:
+        name = f"{first}_{dot}{rest}"
     return name or default
 
 
