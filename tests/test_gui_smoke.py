@@ -287,8 +287,13 @@ class TestControlStates(unittest.TestCase):
 
     def tearDown(self):
         import shutil
+        from unittest.mock import patch
         from audio_transcriber.ui import icons
-        self.app.on_close()
+        # A test may leave a stand-in worker "alive". Closing then asks whether
+        # to quit - in a real dialog, which nobody answers: the whole run hung.
+        with patch("audio_transcriber.ui.app.messagebox") as box:
+            box.askyesno.return_value = True
+            self.app.on_close()
         for patcher in self.patches:
             patcher.stop()
         icons._ICON_CACHE.clear()
@@ -408,6 +413,75 @@ class TestControlStates(unittest.TestCase):
         with patch("audio_transcriber.ui.app.filedialog") as dialog:
             self.app.upload_and_transcribe()
         dialog.askopenfilename.assert_not_called()
+
+
+    # -- a run works on a copy of the settings ---------------------------
+    def _change_the_settings_in_the_window(self):
+        """What moving to the Settings tab and pressing 'Save settings' does
+        to the live object (without writing the file)."""
+        self.app.lang_combo.current(3)                    # Turkish
+        self.app.model_combo.current(6)                   # large-v3
+        self.app.api_entry.insert(0, "another-key")
+        self.app._sync_settings_from_ui()
+
+    def test_the_closing_pass_gets_a_copy_not_the_live_settings(self):
+        self._begin_a_recording()
+        finalizer = self._stop_the_recording()
+        given = finalizer.call_args[0][1]
+        self.assertIsNot(given, self.app.settings)
+        self.assertEqual(given.language, self.app.settings.language)
+
+    def test_changes_made_during_processing_do_not_reach_the_run(self):
+        self._begin_a_recording()
+        finalizer = self._stop_the_recording()
+        given = finalizer.call_args[0][1]
+        before = (given.language, given.model, given.api_key)
+
+        self._change_the_settings_in_the_window()
+
+        self.assertNotEqual(self.app.settings.language, before[0], "test needs a change")
+        self.assertEqual((given.language, given.model, given.api_key), before)
+
+    def test_what_changes_while_recording_does_not_change_the_language_half_way(self):
+        """Live chunks and the closing pass must be recognised the same way."""
+        from unittest.mock import patch
+        self.app.live_var.set(True)
+        with patch("audio_transcriber.ui.app.pipeline.LiveTranscriber") as live:
+            self._begin_a_recording()
+        live_settings = live.call_args[0][1]
+        language = live_settings.language
+
+        self._change_the_settings_in_the_window()
+        finalizer = self._stop_the_recording()
+
+        self.assertEqual(live_settings.language, language)
+        self.assertIs(finalizer.call_args[0][1], live_settings,
+                      "one copy for the whole recording")
+
+    def test_levels_set_while_recording_still_shape_the_mixdown(self):
+        """The gain sliders are meant to be moved while listening to the meters;
+        the mixdown is made when the recording stops."""
+        self._begin_a_recording()
+        self.app._on_mic_gain(6.0)
+        self.app._on_sys_gain(-4.0)
+        finalizer = self._stop_the_recording()
+        given = finalizer.call_args[0][1]
+        self.assertEqual((given.mic_gain_db, given.loop_gain_db), (6.0, -4.0))
+
+    def test_the_preview_works_on_a_copy_too(self):
+        from unittest.mock import patch
+        self.app.preview_var.set(True)
+        with patch("audio_transcriber.ui.app.pipeline.LivePreview") as preview:
+            self._begin_a_recording()
+        self.assertIsNot(preview.call_args[0][1], self.app.settings)
+
+    def test_an_upload_gets_a_copy_not_the_live_settings(self):
+        from unittest.mock import patch
+        with patch("audio_transcriber.ui.app.filedialog") as dialog,                 patch("audio_transcriber.ui.app.pipeline.FileFinalizer") as worker:
+            dialog.askopenfilename.return_value = os.path.join(self.out_dir, "in.wav")
+            self.app.upload_and_transcribe()
+        worker.assert_called_once()
+        self.assertIsNot(worker.call_args[0][1], self.app.settings)
 
 
 def _make_raw_tracks(folder, base, kinds=("mic", "sys"), seconds=2.0, rate=16000):
@@ -578,6 +652,7 @@ class TestRecoveryInTheApp(unittest.TestCase):
         self.assertEqual(sorted([recording.mic.path, recording.sys.path]),
                          sorted(made))
         self.assertIn("Recovered", " ".join(recording.warnings))
+        self.assertIsNot(finalizer.call_args[0][1], self.app.settings)
         self.assertEqual(str(self.app.upload_btn["state"]), "disabled")
         self.assertEqual(str(self.app.start_btn["state"]), "disabled")
         self.assertFalse(self._banner_shown(), "no banner while it is processed")

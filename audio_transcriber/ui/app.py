@@ -60,6 +60,7 @@ class RecorderApp:
         self.live_preview = None
         self.recording_base_name = None
         self.recording_started_at = None
+        self._run_settings = None        # the copy of the settings a run works on
         self._work_thread = None         # the finalizer thread of the current run
         self._processing_base = None     # raw-track name of a recovered recording
         self._unfinished = []            # what find_unfinished() saw last
@@ -588,6 +589,12 @@ class RecorderApp:
             return
         self._apply_base_name(base_name)
 
+        # The run gets its own copy: the sliders and 'Save settings' go on
+        # changing self.settings while it is under way, and the live chunks and
+        # the closing pass must be recognised with one and the same model and
+        # language.
+        self._run_settings = self.settings.snapshot()
+
         # Attach live transcription BEFORE the first block is written: its
         # sample positions are positions in the raw file, and a late start
         # would shift the whole live half of the transcript.
@@ -626,14 +633,14 @@ class RecorderApp:
         """
         wants_live = bool(self.live_var.get())
         wants_preview = bool(self.preview_var.get())
+        run = self._run_settings
 
-        if wants_live and pipeline.live_transcription_possible(self.settings):
-            self.live = pipeline.LiveTranscriber(self.bridge, self.settings,
-                                                 self.engine,
+        if wants_live and pipeline.live_transcription_possible(run):
+            self.live = pipeline.LiveTranscriber(self.bridge, run, self.engine,
                                                  preview=wants_preview)
             self.live.start(base_name)
             return [f"Live transcription running with "
-                    f"{self.settings.model_name()} - stopping only has to "
+                    f"{run.model_name()} - stopping only has to "
                     f"catch up with the tail.\n"]
 
         notes = []
@@ -641,8 +648,7 @@ class RecorderApp:
             notes.append("⚠ Live transcription needs a local model; "
                          "ElevenLabs transcribes after you stop.\n")
         if wants_preview:
-            self.live_preview = pipeline.LivePreview(self.bridge, self.settings,
-                                                     self.engine)
+            self.live_preview = pipeline.LivePreview(self.bridge, run, self.engine)
             self.live_preview.start()
         return notes
 
@@ -680,10 +686,19 @@ class RecorderApp:
             self._reset_controls()
             return
 
+        # The levels are meant to be moved while listening to the meters, and
+        # the mixdown they shape is made now; everything else stays as it was
+        # when the recording began.
+        if self._run_settings is None:
+            self._run_settings = self.settings.snapshot()
+        self._run_settings.mic_gain_db = self.settings.mic_gain_db
+        self._run_settings.loop_gain_db = self.settings.loop_gain_db
+
         self._start_finalizer(recording, self.recording_base_name, live=live)
 
     def _start_finalizer(self, recording, base_name, live=None):
-        self.finalizer = pipeline.Finalizer(self.bridge, self.settings, live=live)
+        self.finalizer = pipeline.Finalizer(self.bridge, self._run_settings,
+                                            live=live)
         self._work_thread = self.finalizer.run_async(recording, base_name)
 
     def upload_and_transcribe(self):
@@ -724,7 +739,8 @@ class RecorderApp:
         self.transcript.clear()
         self.transcript.append(f"Processing uploaded file: {os.path.basename(file_path)}\n")
 
-        self.finalizer = pipeline.FileFinalizer(self.bridge, self.settings)
+        self.finalizer = pipeline.FileFinalizer(self.bridge,
+                                                self.settings.snapshot())
         self._work_thread = self.finalizer.run_async(file_path, base_name)
 
     # ------------------------------------------------------------------
@@ -842,6 +858,7 @@ class RecorderApp:
 
         self.recording_base_name = base_name
         self._processing_base = unfinished.base_name
+        self._run_settings = self.settings.snapshot()
         self._start_finalizer(capture.recording_from_unfinished(unfinished),
                               base_name)
 

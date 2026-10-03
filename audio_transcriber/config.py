@@ -6,7 +6,7 @@ load_settings), which silently swallowed every exception.
 
 import json
 import os
-from dataclasses import dataclass, asdict, field, fields
+from dataclasses import dataclass, asdict, field, fields, replace
 
 from . import secretstore
 from .paths import CFG_PATH
@@ -122,6 +122,16 @@ class Settings:
 
     def uses_cloud(self):
         return self.model_name() is None
+
+    def snapshot(self):
+        """An independent copy for a worker thread.
+
+        The window keeps changing the live object while a run is going on: a
+        gain slider moves it, 'Save settings' rewrites it from the widgets. A
+        worker that read it directly could change model or language half way
+        through a transcript.
+        """
+        return replace(self)
 
     def live_model_name(self):
         """Model used for the live preview.

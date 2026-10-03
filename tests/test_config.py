@@ -301,5 +301,37 @@ class TestModelSelection(unittest.TestCase):
         self.assertEqual(config.Settings(whisper_threads=6).threads(), 6)
 
 
+class TestSettingsSnapshot(unittest.TestCase):
+    """A run works on a copy: the window goes on changing the live settings
+    (the gain sliders, 'Save settings') while a transcription is under way."""
+
+    def test_a_snapshot_is_independent_of_the_original(self):
+        original = config.Settings(language="en", mic_gain_db=3.0,
+                                   model="medium", output_dir="/a")
+        snapshot = original.snapshot()
+        self.assertEqual(snapshot, original)
+
+        original.language = "tr"
+        original.mic_gain_db = -9.0
+        original.model = "tiny"
+        original.output_dir = "/b"
+        self.assertEqual((snapshot.language, snapshot.mic_gain_db, snapshot.model,
+                          snapshot.output_dir), ("en", 3.0, "medium", "/a"))
+
+    def test_the_runtime_only_fields_are_copied_too(self):
+        original = config.Settings()
+        original.api_key = SAMPLE_KEY
+        original.migrated_plaintext_key = True
+        snapshot = original.snapshot()
+        self.assertEqual(snapshot.api_key, SAMPLE_KEY)
+        self.assertTrue(snapshot.migrated_plaintext_key)
+
+    def test_a_snapshot_is_a_settings_object_with_the_same_behaviour(self):
+        snapshot = config.Settings(model=config.CLOUD_MODEL, whisper_threads=3).snapshot()
+        self.assertIsInstance(snapshot, config.Settings)
+        self.assertTrue(snapshot.uses_cloud())
+        self.assertEqual(snapshot.threads(), 3)
+
+
 if __name__ == "__main__":
     unittest.main()
