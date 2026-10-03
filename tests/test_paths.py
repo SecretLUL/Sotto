@@ -1,5 +1,8 @@
 """Tests for central path handling: output names, scratch files, data location."""
 
+import os
+import shutil
+import tempfile
 import unittest
 
 from audio_transcriber import paths
@@ -67,6 +70,90 @@ class TestReservedDeviceNames(unittest.TestCase):
         for raw in ("console", "nullable", "com10", "auxiliary", "lpt", "com"):
             with self.subTest(raw=raw):
                 self.assertEqual(paths.safe_output_name(raw), raw)
+
+
+class TestScratchName(unittest.TestCase):
+    """whisper-cli cannot open files named in Turkish or Arabic (ANSI argv)."""
+
+    def test_is_ascii_and_keeps_the_suffix(self):
+        name = paths.scratch_name("mic", suffix=".asr.wav")
+        self.assertTrue(name.isascii())
+        self.assertRegex(name, r"^mic-[0-9a-f]{10}\.asr\.wav$")
+
+    def test_labels_are_joined(self):
+        self.assertRegex(paths.scratch_name("mic", "live", "3"),
+                         r"^mic-live-3-[0-9a-f]{10}\.wav$")
+        self.assertRegex(paths.scratch_name(), r"^[0-9a-f]{10}\.wav$")
+
+    def test_nothing_a_user_could_type_survives(self):
+        name = paths.scratch_name("\u00fc/..\\toplant\u0131", "")
+        self.assertTrue(name.isascii())
+        self.assertNotIn("/", name)
+        self.assertNotIn("\\", name)
+        self.assertRegex(name, r"^toplant-[0-9a-f]{10}\.wav$")
+
+    def test_two_calls_never_collide(self):
+        names = {paths.scratch_name("mic") for _ in range(200)}
+        self.assertEqual(len(names), 200)
+
+
+class TestAnsiSafePath(unittest.TestCase):
+    """Directories are not ours to name: 'C:\\Users\\Sirin' may be Turkish."""
+
+    TURKISH = "C:\\Users\\S\u0131rin\\model.bin"
+
+    @staticmethod
+    def _never(_path):
+        raise AssertionError("the short form must not be asked for")
+
+    def test_ascii_paths_are_left_alone(self):
+        self.assertEqual(
+            paths.ansi_safe_path("C:\\bin\\model.bin", windows=True,
+                                 short_path=self._never),
+            "C:\\bin\\model.bin")
+
+    def test_other_platforms_pass_everything_through(self):
+        self.assertEqual(
+            paths.ansi_safe_path(self.TURKISH, windows=False,
+                                 short_path=self._never),
+            self.TURKISH)
+
+    def test_uses_the_short_form_when_there_is_one(self):
+        self.assertEqual(
+            paths.ansi_safe_path(self.TURKISH, windows=True,
+                                 short_path=lambda _p: "C:\\Users\\SIRIN~1\\model.bin"),
+            "C:\\Users\\SIRIN~1\\model.bin")
+
+    def test_falls_back_when_there_is_no_usable_short_form(self):
+        def broken(_path):
+            raise OSError("no such file")
+
+        for short_path in (lambda _p: None, lambda _p: "", broken,
+                           lambda _p: self.TURKISH):          # still not ASCII
+            with self.subTest(short_path=short_path):
+                self.assertEqual(
+                    paths.ansi_safe_path(self.TURKISH, windows=True,
+                                         short_path=short_path),
+                    self.TURKISH)
+
+
+@unittest.skipUnless(os.name == "nt", "8.3 short names are a Windows feature")
+class TestRealShortPath(unittest.TestCase):
+    def test_a_non_ascii_location_becomes_ascii_and_stays_the_same_file(self):
+        base = tempfile.mkdtemp()
+        try:
+            folder = os.path.join(base, "S\u0131rin_\u015firket")
+            os.makedirs(folder)
+            target = os.path.join(folder, "toplant\u0131_\u0627\u062c.bin")
+            with open(target, "wb") as handle:
+                handle.write(b"x")
+
+            result = paths.ansi_safe_path(target)
+            if not result.isascii():
+                self.skipTest("this volume has no 8.3 short names")
+            self.assertTrue(os.path.samefile(result, target))
+        finally:
+            shutil.rmtree(base, ignore_errors=True)
 
 
 if __name__ == "__main__":

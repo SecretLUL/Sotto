@@ -8,6 +8,7 @@ Every path now hangs off the script directory.
 
 import os
 import re
+import uuid
 
 # .../Audio-Transcriber/audio_transcriber/paths.py  ->  .../Audio-Transcriber
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -86,6 +87,64 @@ def safe_output_name(user_input, default="my_meeting"):
     if first.rstrip().upper() in _RESERVED_NAMES:
         name = f"{first}_{dot}{rest}"
     return name or default
+
+
+def scratch_name(*labels, suffix=".wav"):
+    """Unique, ASCII-only file name for a temporary file whisper-cli must open.
+
+    whisper-cli.exe receives its arguments in the ANSI code page. On a western
+    Windows a Turkish or Arabic recording name arrives mangled ('toplantı'
+    becomes 'toplanti', Arabic becomes '???') and whisper stops with exit code
+    2, "input file not found" - so nothing the user typed may end up in such a
+    name. The labels are program constants ('mic', 'live', ...); a random token
+    keeps two runs from ever sharing a file.
+    """
+    parts = [re.sub(r"[^A-Za-z0-9]+", "", str(label)) for label in labels]
+    parts = [part for part in parts if part]
+    parts.append(uuid.uuid4().hex[:10])
+    return "-".join(parts) + suffix
+
+
+def ansi_safe_path(path, windows=None, short_path=None):
+    """`path` in a form whisper-cli.exe can open, given its ANSI arguments.
+
+    scratch_name() keeps user text out of file names, but the directories are
+    not ours to choose: an install folder or user profile with a Turkish or
+    Arabic name breaks the model path and the input path alike (exit code 2,
+    "input file not found"). The 8.3 short form of an existing path is pure
+    ASCII, so it is used instead. A volume without short names, or a path that
+    does not exist, leaves the path unchanged - the call then fails as it
+    always did.
+
+    `windows` and `short_path` exist so the logic can be tested anywhere.
+    """
+    if windows is None:
+        windows = os.name == "nt"
+    if not windows or path.isascii():
+        return path
+    short_path = short_path or _windows_short_path
+    try:
+        short = short_path(path)
+    except OSError:
+        short = None
+    return short if short and short.isascii() else path
+
+
+def _windows_short_path(path):
+    """The 8.3 form of an existing path, or None if there is none."""
+    import ctypes
+    from ctypes import wintypes
+
+    get_short = ctypes.WinDLL("kernel32", use_last_error=True).GetShortPathNameW
+    get_short.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+    get_short.restype = wintypes.DWORD
+
+    needed = get_short(path, None, 0)
+    if not needed:
+        return None
+    buffer = ctypes.create_unicode_buffer(needed)
+    written = get_short(path, buffer, needed)
+    return buffer.value if written else None
 
 
 def existing_outputs(out_dir, base_name, extensions=OUTPUT_EXTENSIONS):

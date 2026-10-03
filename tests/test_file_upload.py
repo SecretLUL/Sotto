@@ -223,6 +223,50 @@ class TestFileFinalizer(unittest.TestCase):
         self.assertEqual(os.path.basename(finished[0].audio_path),
                          "Meeting 03.10.2026.wav")
 
+    def _tone_file(self, name="input.wav"):
+        path = os.path.join(self.temp_dir, name)
+        t = np.linspace(0, 2, 16000 * 2, dtype=np.float32)
+        sf.write(path, 0.5 * np.sin(2 * np.pi * 440 * t), 16000)
+        return path
+
+    def test_scratch_file_has_an_ascii_name_and_is_removed(self):
+        """A Turkish or Arabic file name must not reach whisper-cli (ANSI
+        arguments, exit 2 'input file not found'), and the scratch copy must be
+        gone afterwards."""
+        name = "toplantı_şirket_اجتماع"
+        seen = []
+
+        class SpyBackend(TestMockBackend):
+            def transcribe(self, path, language="de", log=None, track="",
+                           progress=None):
+                seen.append((os.path.basename(path), os.path.exists(path)))
+                return super().transcribe(path, language, log, track, progress)
+
+        bridge = TestMockBridge()
+        finalizer = FileFinalizer(bridge, Settings(output_dir=self.out_dir),
+                                  backend_factory=lambda s: SpyBackend())
+        finalizer.run_async(self._tone_file(), base_name=name).join(timeout=5.0)
+
+        self.assertEqual(len(seen), 1, bridge.events)
+        self.assertTrue(seen[0][0].isascii(), seen[0][0])
+        self.assertTrue(seen[0][1], "the file must exist when whisper is called")
+        finished = [e for e in bridge.events if isinstance(e, Finished)]
+        self.assertEqual(os.path.basename(finished[0].txt_path), f"{name}.txt")
+        self.assertEqual(os.listdir(self.tmp_dir), [])
+
+    def test_scratch_file_is_removed_when_recognition_fails(self):
+        class FailingBackend(TestMockBackend):
+            def transcribe(self, *args, **kwargs):
+                raise TranscriptionError("model could not be loaded")
+
+        bridge = TestMockBridge()
+        finalizer = FileFinalizer(bridge, Settings(output_dir=self.out_dir),
+                                  backend_factory=lambda s: FailingBackend())
+        finalizer.run_async(self._tone_file(), base_name="x").join(timeout=5.0)
+
+        self.assertEqual(len([e for e in bridge.events if isinstance(e, Failed)]), 1)
+        self.assertEqual(os.listdir(self.tmp_dir), [])
+
     def test_file_finalizer_silent_audio(self):
 
         silent_path = os.path.join(self.temp_dir, "silent.wav")

@@ -29,6 +29,7 @@ import os
 import subprocess
 import threading
 
+from .. import paths
 from . import binaries
 from .base import Backend, Segment, TranscriptionError, parse_line
 
@@ -100,7 +101,13 @@ class WhisperCppBackend(Backend):
 
         self._cancelled.clear()
         exe, model, vad = self.prepare(progress=progress, log=log)
-        command = self.build_command(exe, model, wav_path, language, vad)
+        # whisper-cli.exe reads its arguments in the ANSI code page; a folder
+        # called after a Turkish or Arabic user would make it fail with "input
+        # file not found" (see paths.ansi_safe_path). The executable itself
+        # is started through the wide-character API and needs no such care.
+        command = self.build_command(
+            exe, paths.ansi_safe_path(model), paths.ansi_safe_path(wav_path),
+            language, paths.ansi_safe_path(vad) if vad else None)
 
         try:
             proc = subprocess.Popen(

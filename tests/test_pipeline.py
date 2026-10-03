@@ -12,9 +12,13 @@ import soundfile as sf
 from audio_transcriber import config, pipeline
 from audio_transcriber.audio import capture, dsp
 from audio_transcriber.events import Failed, Finished, Log, Progress, Status
-from audio_transcriber.transcribe.base import Backend, Segment
+from audio_transcriber.transcribe.base import Backend, Segment, TranscriptionError
 
 RATE = 48000
+
+# A Turkish and an Arabic word: neither survives whisper-cli's ANSI arguments
+# on a western Windows (code page 1252).
+HARD_NAME = "toplantı_şirket_اجتماع"
 
 
 class FakeBridge:
@@ -206,6 +210,75 @@ class TestFinalizer(unittest.TestCase):
         recording = self._make_recording()
         self._run(recording, {"mic": [(1.0, 3.0, "A")], "sys": []})
         self.assertTrue(os.path.exists(recording.mic.path))
+
+    # ------------------------------------------------------------------
+    def _spy(self, per_track):
+        """A backend factory that notes every file it is asked to read."""
+        seen = []
+
+        class SpyBackend(FakeBackend):
+            def transcribe(self, wav_path, language="de", log=None, track="",
+                           progress=None):
+                seen.append((os.path.basename(wav_path), os.path.exists(wav_path)))
+                return super().transcribe(wav_path, language, log, track, progress)
+
+        return seen, (lambda settings: SpyBackend(per_track))
+
+    def _assert_recognition_files_are_ascii(self):
+        seen, factory = self._spy({"mic": [(1.0, 3.0, "Merhaba")],
+                                   "sys": [(5.0, 7.0, "Hello")]})
+        finalizer = pipeline.Finalizer(self.bridge, self.settings,
+                                       backend_factory=factory)
+        finalizer._process(self._make_recording(), HARD_NAME)
+
+        self.assertTrue(seen, "the backend was never called")
+        for file_name, existed in seen:
+            self.assertTrue(file_name.isascii(), file_name)
+            self.assertTrue(existed, "the file must exist when whisper is called")
+        # What the user gets to see keeps the name they chose.
+        finished = self.bridge.first(Finished)
+        self.assertEqual(os.path.basename(finished.txt_path), f"{HARD_NAME}.txt")
+        self.assertEqual(os.path.basename(finished.audio_path), f"{HARD_NAME}.wav")
+
+    def test_recognition_files_have_ascii_names_per_track(self):
+        """whisper-cli takes ANSI arguments: a Turkish or Arabic recording name
+        arrived mangled and it stopped with 'input file not found' (exit 2)."""
+        self.settings.separate_tracks = True
+        self._assert_recognition_files_are_ascii()
+
+    def test_recognition_files_have_ascii_names_for_the_mixdown(self):
+        self.settings.separate_tracks = False
+        self._assert_recognition_files_are_ascii()
+
+    def test_scratch_files_go_even_when_raw_tracks_are_kept(self):
+        """Only the recorded originals are 'raw tracks'; the normalised copies
+        made for recognition used to pile up in .tmp with that option on."""
+        self.settings.keep_raw_tracks = True
+        recording = self._make_recording()
+        self._run(recording, {"mic": [(1.0, 3.0, "A")], "sys": []})
+
+        self.assertTrue(os.path.exists(recording.mic.path), "originals stay")
+        leftovers = [name for name in os.listdir(self.tmp)
+                     if name.endswith(".asr.wav")]
+        self.assertEqual(leftovers, [])
+
+    def test_scratch_files_go_when_recognition_fails(self):
+        class FailingBackend(FakeBackend):
+            def transcribe(self, *args, **kwargs):
+                raise TranscriptionError("model could not be loaded")
+
+        recording = self._make_recording()
+        finalizer = pipeline.Finalizer(
+            self.bridge, self.settings,
+            backend_factory=lambda s: FailingBackend({}))
+        finalizer._run(recording, "session")
+
+        self.assertIsNotNone(self.bridge.first(Failed))
+        leftovers = [name for name in os.listdir(self.tmp)
+                     if name.endswith(".asr.wav")]
+        self.assertEqual(leftovers, [])
+        self.assertTrue(os.path.exists(recording.mic.path),
+                        "the recorded tracks must survive a failed run")
 
     def test_silent_recording_reports_clear_error(self):
         """Regression M3: the previous version only said 'no data'."""

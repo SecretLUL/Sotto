@@ -173,13 +173,13 @@ class TestLiveTranscriber(unittest.TestCase):
         self.patcher.stop()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def _live(self, **kwargs):
+    def _live(self, name="meeting", **kwargs):
         options = dict(chunk_s=2.0, preview=True)
         options.update(kwargs)
         live = pipeline.LiveTranscriber(
             self.bridge, Settings(), self.engine,
             backend_factory=lambda s: self.backend, **options)
-        live.start("meeting")
+        live.start(name)
         return live
 
     def test_chunks_are_transcribed_while_recording(self):
@@ -212,6 +212,17 @@ class TestLiveTranscriber(unittest.TestCase):
         self.assertEqual(self.backend.calls, [])
         self.assertGreater(covered["sys"], 3.0)               # still covered
         self.assertEqual(segments["sys"], [])
+
+    def test_chunk_files_ignore_the_recording_name_and_are_removed(self):
+        """whisper-cli cannot open a file named in Turkish or Arabic."""
+        live = self._live(name="toplantı_şirket_اجتم")
+        self.engine.feed("mic", speech(5.0))
+        self.assertTrue(wait_for(lambda: self.backend.calls))
+        live.finish(timeout=20.0)
+
+        for call in self.backend.calls:
+            self.assertTrue(os.path.basename(call.path).isascii(), call.path)
+        self.assertEqual(os.listdir(self.tmp), [], "chunk files were left behind")
 
     def test_the_tail_stays_in_the_buffer(self):
         """Anything shorter than a chunk is left to the closing pass."""
