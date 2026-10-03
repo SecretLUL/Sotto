@@ -16,7 +16,8 @@ import sys
 from ctypes import wintypes
 
 # Extra entropy: besides the Windows account, an attacker also needs this
-# application-specific value to decrypt the blob.
+# application-specific value to decrypt the blob. It predates the name Sotto and
+# must stay as it is: stored keys can only be decrypted with the same value.
 _ENTROPY = b"AudioTranscriber/v2/elevenlabs"
 
 _IS_WINDOWS = sys.platform == "win32"

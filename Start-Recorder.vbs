@@ -1,4 +1,4 @@
-' Starts the Audio AI Recorder without a console window.
+' Starts Sotto without a console window.
 '
 ' Compared with the previous version:
 '   * The working directory is set to the script folder rather than
@@ -19,7 +19,7 @@ target = fso.BuildPath(scriptDir, "main.py")
 
 If Not fso.FileExists(target) Then
     MsgBox "main.py was not found in:" & vbCrLf & scriptDir, _
-           vbCritical, "Audio AI Recorder"
+           vbCritical, "Sotto"
     WScript.Quit 1
 End If
 
@@ -40,7 +40,7 @@ If Err.Number <> 0 Then
                "the PATH." & vbCrLf & vbCrLf & _
                "To troubleshoot, run this from a command prompt:" & vbCrLf & _
                "    python """ & target & """", _
-               vbCritical, "Audio AI Recorder"
+               vbCritical, "Sotto"
         WScript.Quit 1
     End If
 End If

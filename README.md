@@ -1,10 +1,14 @@
-# Audio AI Recorder & Transcriber
+<p align="center">
+  <img src="assets/banner.svg" alt="Sotto: private meeting transcripts, made on your machine" width="100%">
+</p>
 
-[![Release](https://img.shields.io/github/v/release/SecretLUL/Audio-Transcriber?label=Release)](https://github.com/SecretLUL/Audio-Transcriber/releases/latest)
-[![CI](https://github.com/SecretLUL/Audio-Transcriber/actions/workflows/ci.yml/badge.svg)](https://github.com/SecretLUL/Audio-Transcriber/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+<p align="center">
+  <a href="https://github.com/SecretLUL/Sotto/releases/latest"><img src="https://img.shields.io/github/v/release/SecretLUL/Sotto?label=Release" alt="Release"></a>
+  <a href="https://github.com/SecretLUL/Sotto/actions/workflows/ci.yml"><img src="https://github.com/SecretLUL/Sotto/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+</p>
 
-Records your microphone and the system audio as two separate tracks and turns a meeting into a transcript that knows who said what. Transcription runs locally with [whisper.cpp](https://github.com/ggml-org/whisper.cpp), or in the cloud with ElevenLabs Scribe if you choose it.
+Sotto records your microphone and the system audio as two separate tracks and turns a meeting into a transcript that knows who said what. Transcription runs locally with [whisper.cpp](https://github.com/ggml-org/whisper.cpp), or in the cloud with ElevenLabs Scribe if you choose it. The name comes from *sotto voce*, in a low voice: with the local engine, nothing that is said leaves your machine.
 
 ## Features
 
@@ -17,7 +21,7 @@ Records your microphone and the system audio as two separate tracks and turns a 
 
 ## Download
 
-Get the archive for your system from the [latest release](https://github.com/SecretLUL/Audio-Transcriber/releases/latest), extract it and start `AudioTranscriber`.
+Get the archive for your system from the [latest release](https://github.com/SecretLUL/Sotto/releases/latest), extract it and start `AudioTranscriber`.
 
 | System | Archive | System audio |
 | :--- | :--- | :--- |
@@ -32,8 +36,8 @@ Get the archive for your system from the [latest release](https://github.com/Sec
 ## Run from source
 
 ```shell
-git clone https://github.com/SecretLUL/Audio-Transcriber.git
-cd Audio-Transcriber
+git clone https://github.com/SecretLUL/Sotto.git
+cd Sotto
 pip install -r requirements.txt
 python main.py
 ```

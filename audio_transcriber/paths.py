@@ -24,6 +24,8 @@ import re
 import sys
 import uuid
 
+# The name of the per-user data folder, from before the app was called Sotto.
+# Renaming it would leave every user's models and settings behind.
 APP_NAME = "AudioTranscriber"
 
 # Names the data directory explicitly - portable installs, tests, CI.

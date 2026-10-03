@@ -62,7 +62,7 @@ KEY_HINT_SESSION = ("This system has no secure place for the key, so it is kept 
 class RecorderApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Audio AI Recorder")
+        self.root.title("Sotto")
 
         T.apply(root)                    # first: it sets the display scaling
         self._size_window()
@@ -172,7 +172,7 @@ class RecorderApp:
 
         text_frame = tk.Frame(left, bg=T.BG)
         text_frame.pack(side=tk.LEFT)
-        tk.Label(text_frame, text="Audio AI Recorder", bg=T.BG, fg=T.TEXT,
+        tk.Label(text_frame, text="Sotto", bg=T.BG, fg=T.TEXT,
                  font=T.fonts["display"], anchor="w").pack(anchor="w")
         self.subtitle = tk.Label(
             text_frame, bg=T.BG, fg=T.TEXT_MUTE, font=T.fonts["small"], anchor="w",

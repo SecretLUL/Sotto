@@ -1,4 +1,4 @@
-"""Automated build script for Audio AI Recorder & Transcriber.
+"""Automated build script for Sotto.
 
 Builds a standalone executable using PyInstaller, prunes heavy unused packages
 from the local environment, and packages the result into a release archive.
@@ -21,6 +21,9 @@ import sys
 import tarfile
 import zipfile
 
+# The executable, the archives and the folder they unpack to keep the name from
+# before Sotto: models, recordings and settings.json live in that folder, and an
+# update unpacked over it has to find them there.
 APP_NAME = "AudioTranscriber"
 FALLBACK_VERSION = "v0.0.0-dev"
 

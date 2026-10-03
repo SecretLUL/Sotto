@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-labelledby="title">
+  <title id="title">Sotto</title>
+  <!-- An S from two arcs: the upper one in the colour Sotto gives your own
+       voice, the lower one in the colour of everyone else on the call. -->
+  <defs>
+    <linearGradient id="badge" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#232838"/>
+      <stop offset="1" stop-color="#0a0c0e"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#38bdf8" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#38bdf8" stop-opacity="0"/>
+    </radialGradient>
+    <!-- your voice -->
+    <linearGradient id="you" gradientUnits="userSpaceOnUse" x1="0" y1="108" x2="0" y2="256">
+      <stop offset="0" stop-color="#7dd3fc"/>
+      <stop offset="1" stop-color="#38bdf8"/>
+    </linearGradient>
+    <!-- everyone else -->
+    <linearGradient id="them" gradientUnits="userSpaceOnUse" x1="0" y1="256" x2="0" y2="404">
+      <stop offset="0" stop-color="#34d399"/>
+      <stop offset="1" stop-color="#10b981"/>
+    </linearGradient>
+  </defs>
+  <rect x="24" y="24" width="464" height="464" rx="116" fill="url(#badge)"/>
+  <rect x="25.5" y="25.5" width="461" height="461" rx="114.5" fill="none" stroke="#2e3445" stroke-width="3"/>
+  <circle cx="256" cy="256" r="210" fill="url(#glow)"/>
+  <g fill="none">
+    <path d="M 330.17 147.26 A 84 74 0 1 0 257.47 255.99" stroke="url(#you)" stroke-width="46" stroke-linecap="round"/>
+    <path d="M 256 256 A 84 74 0 1 1 181.83 364.74" stroke="url(#them)" stroke-width="46"/>
+    <circle cx="181.83" cy="364.74" r="23" fill="url(#them)" stroke="none"/>
+  </g>
+</svg>
