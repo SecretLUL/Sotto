@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import soundfile as sf
 
-from . import dsp
+from . import dsp, stream
 
 BLOCK_FRAMES = 1024
 LIVE_WINDOW_S = 30.0
@@ -508,11 +508,9 @@ def load_track(track_result, target_rate=dsp.TARGET_RATE):
     if track_result is None or not os.path.exists(track_result.path):
         return np.zeros(0, dtype=np.float32)
 
-    data, rate = sf.read(track_result.path, dtype="float32", always_2d=False)
-    if data.ndim > 1:
-        data = data.mean(axis=1)
-
-    resampled = dsp.resample(data, rate, target_rate)
+    # Chunk by chunk: a raw track at its native rate is about 700 MB per hour,
+    # and the whole of it used to sit in memory next to its resampled copy.
+    resampled = stream.read_mono_resampled(track_result.path, target_rate)
     pad = int(round(track_result.start_offset_s * target_rate))
     if pad > 0:
         resampled = np.concatenate([np.zeros(pad, dtype=np.float32), resampled])

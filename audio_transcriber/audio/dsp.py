@@ -94,6 +94,72 @@ def resample(x, src_rate, dst_rate=TARGET_RATE):
     return sps.resample_poly(x, up, down).astype(np.float32)
 
 
+def chunk_frames(src_rate, dst_rate=TARGET_RATE, seconds=30.0):
+    """A chunk length for resample_stream(): about `seconds` of audio, rounded
+    to a multiple of the down-sampling factor so every chunk's output lines up
+    with the output grid of the whole signal."""
+    src_rate, dst_rate = int(src_rate), int(dst_rate)
+    down = src_rate // math.gcd(dst_rate, src_rate)
+    return max(down, int(seconds * src_rate) // down * down)
+
+
+def resample_stream(chunks, src_rate, dst_rate=TARGET_RATE, context_s=1.0):
+    """Resample consecutive mono chunks, yielding the resampled chunks.
+
+    The result is what resample() gives for the whole signal - up to floating
+    point - but only a few chunks are in memory at a time. resample() warns
+    against calling resample_poly block by block, and rightly: every call
+    filters on its own, which leaves a click at each boundary. Here every chunk
+    is filtered together with a second of its neighbours' audio on either side
+    and only its own part is kept, so the filter always sees real samples where
+    the whole-signal run would. At the very start and end there are no
+    neighbours, exactly as in the whole-signal run.
+
+    Every chunk but the last must be a multiple of the down-sampling factor
+    long (chunk_frames() gives such a length). That keeps each chunk's output
+    on the global output grid; without it the samples would drift against the
+    whole-signal result.
+    """
+    src_rate, dst_rate = int(src_rate), int(dst_rate)
+    iterator = iter(chunks)
+
+    def next_chunk():
+        for chunk in iterator:
+            chunk = np.asarray(chunk, dtype=np.float32)
+            if len(chunk):
+                return chunk
+        return None
+
+    if src_rate == dst_rate:
+        chunk = next_chunk()
+        while chunk is not None:
+            yield chunk
+            chunk = next_chunk()
+        return
+
+    divisor = math.gcd(dst_rate, src_rate)
+    up, down = dst_rate // divisor, src_rate // divisor
+    context = max(1, int(context_s * src_rate) // down) * down
+
+    carry = np.zeros(0, dtype=np.float32)
+    current = next_chunk()
+    while current is not None:
+        following = next_chunk()
+        last = following is None
+        if not last and len(current) % down:
+            raise ValueError(f"every chunk but the last must be a multiple of "
+                             f"{down} frames long, got {len(current)}")
+        right = np.zeros(0, dtype=np.float32) if last else following[:context]
+        resampled = sps.resample_poly(np.concatenate([carry, current, right]),
+                                      up, down)
+        start = len(carry) * up // down
+        count = (-(-len(current) * up // down) if last
+                 else len(current) * up // down)
+        yield resampled[start:start + count].astype(np.float32)
+        carry = current[-context:]
+        current = following
+
+
 # ----------------------------------------------------------------------
 # Level measurement
 # ----------------------------------------------------------------------
