@@ -16,6 +16,7 @@ covered_s and are merged through the same diarize pass as before.
 """
 
 import os
+import shutil
 import threading
 from dataclasses import replace
 
@@ -78,6 +79,7 @@ def build_backend(settings, greedy=False, live=False):
         model_name=model,
         threads=settings.threads(),
         use_vad=settings.use_vad,
+        allow_gpu=settings.use_gpu,
         greedy=greedy,
     )
 
@@ -92,77 +94,118 @@ def live_transcription_possible(settings):
     return not settings.uses_cloud()
 
 
-class _ScratchFiles:
-    """Temporary files of one run: named without user text, gone when it ends.
+class _Worker:
+    """What the closing pass of a recording and the transcription of an
+    uploaded file have in common: a thread, a cancel flag with the backends to
+    cancel along with it, and scratch files that are gone when the run ends.
 
-    Their names come from paths.scratch_name() - ASCII only, because whisper-cli
-    cannot open a file whose name was typed in Turkish or Arabic - and they are
-    removed when the run ends, whether it succeeded, failed or was cancelled.
-    The files used to be named after the recording and cleaned up on success
-    only (and, with "keep raw tracks", not even then).
+    The scratch files are named by paths.scratch_name() - ASCII only, because
+    whisper-cli cannot open a file whose name was typed in Turkish or Arabic -
+    and removed when the run ends, whether it succeeded, failed or was
+    cancelled. They used to be named after the recording and cleaned up on
+    success only (and, with "keep raw tracks", not even then).
+
+    A subclass implements _work(); it is given what run_async() was given.
     """
 
-    _scratch = None
+    thread_name = "worker"
+    # Heading of the error shown when anything but a TranscriptionError ends
+    # the run - the last line of defence, so the window never stays locked.
+    failure_title = "Unexpected error during processing"
 
-    def _scratch_path(self, *labels, suffix=".wav"):
-        path = os.path.join(TMP_DIR, paths.scratch_name(*labels, suffix=suffix))
-        if self._scratch is None:
-            self._scratch = []
-        self._scratch.append(path)
-        return path
-
-    def _remove_scratch(self):
-        for path in self._scratch or ():
-            _try_remove(path)
-        self._scratch = []
-
-
-class Finalizer(_ScratchFiles):
-    """Runs the post-processing of a recording in a worker thread."""
-
-    def __init__(self, bridge, settings, backend_factory=None, live=None):
+    def __init__(self, bridge, settings, backend_factory=None):
         self.bridge = bridge
         self.settings = settings
         # Injectable so the flow can be tested without a real AI backend.
         self.backend_factory = backend_factory or (lambda s: build_backend(s))
-        # LiveTranscriber of this recording, if one ran.
-        self.live = live
         self._backends = []
         self._cancelled = threading.Event()
+        self._scratch = []
 
     def cancel(self):
         self._cancelled.set()
-        if self.live is not None:
-            self.live.cancel()
         for backend in list(self._backends):
             try:
                 backend.cancel()
             except Exception:
                 pass
 
+    def _check_cancelled(self):
+        if self._cancelled.is_set():
+            raise TranscriptionError("Processing cancelled.")
+
     # ------------------------------------------------------------------
-    def run_async(self, recording, base_name):
-        thread = threading.Thread(target=self._run, args=(recording, base_name),
-                                  name="finalize", daemon=True)
+    def _start(self, *args):
+        thread = threading.Thread(target=self._run, args=args,
+                                  name=self.thread_name, daemon=True)
         thread.start()
         return thread
 
-    def _run(self, recording, base_name):
+    def _run(self, *args):
         try:
-            self._process(recording, base_name)
+            self._process(*args)
         except TranscriptionError as exc:
             self.bridge.post(Failed(message=str(exc)))
         except Exception as exc:                      # last line of defence
-            self.bridge.post_exception("Unexpected error during processing", exc)
+            self.bridge.post_exception(self.failure_title, exc)
 
-    # ------------------------------------------------------------------
-    def _process(self, recording, base_name):
+    def _process(self, *args):
         try:
-            self._process_recording(recording, base_name)
+            self._work(*args)
         finally:
             self._remove_scratch()
 
-    def _process_recording(self, recording, base_name):
+    def _work(self, *args):
+        raise NotImplementedError
+
+    # ------------------------------------------------------------------
+    def _transcribe(self, path, kind):
+        backend = self.backend_factory(self.settings)
+        self._backends.append(backend)
+        try:
+            return backend.transcribe(
+                path,
+                language=self.settings.language,
+                log=lambda message: self.bridge.post(Log(message)),
+                track=kind,
+                progress=lambda message: self.bridge.post(Progress(message)),
+            )
+        finally:
+            if backend in self._backends:
+                self._backends.remove(backend)
+
+    def _scratch_path(self, *labels, suffix=".wav"):
+        path = os.path.join(TMP_DIR, paths.scratch_name(*labels, suffix=suffix))
+        self._scratch.append(path)
+        return path
+
+    def _remove_scratch(self):
+        for path in self._scratch:
+            _try_remove(path)
+        self._scratch = []
+
+
+class Finalizer(_Worker):
+    """Runs the post-processing of a recording in a worker thread."""
+
+    thread_name = "finalize"
+
+    def __init__(self, bridge, settings, backend_factory=None, live=None):
+        super().__init__(bridge, settings, backend_factory)
+        # LiveTranscriber of this recording, if one ran.
+        self.live = live
+
+    def cancel(self):
+        self._cancelled.set()
+        if self.live is not None:
+            self.live.cancel()
+        super().cancel()
+
+    def run_async(self, recording, base_name):
+        return self._start(recording, base_name)
+
+    # ------------------------------------------------------------------
+    def _work(self, recording, base_name):
         bridge, settings = self.bridge, self.settings
         out_dir = settings.get_output_dir()
         os.makedirs(out_dir, exist_ok=True)
@@ -237,8 +280,7 @@ class Finalizer(_ScratchFiles):
         # that path is the better one anyway once the work is already done.
         if settings.separate_tracks or any(live_segments.values()):
             for kind, path in asr_paths.items():
-                if self._cancelled.is_set():
-                    raise TranscriptionError("Processing cancelled.")
+                self._check_cancelled()
                 label = "your track" if kind == "mic" else "the system track"
                 bridge.post(Status(f"Transcribing {label}…", "purple"))
                 bridge.post(Log(f"\n--- Transcription: {label} ---\n"))
@@ -281,16 +323,42 @@ class Finalizer(_ScratchFiles):
         with open(txt_path, "w", encoding="utf-8") as handle:
             handle.write(text + "\n")
 
-        # --- 6. Clean up -------------------------------------------------
+        # --- 6. The recorded originals ------------------------------------
         # The normalised copies made for recognition are scratch files and go
-        # in every case (_process removes them, success or not); "keep raw
-        # tracks" is about the recorded originals.
-        if not settings.keep_raw_tracks:
-            for track in (recording.mic, recording.sys):
-                if track and os.path.exists(track.path):
-                    _try_remove(track.path)
+        # in every case (_process removes them, success or not). The recorded
+        # tracks are what "keep raw tracks" is about: they move next to the
+        # transcript, where a DAW can find them - not into the hidden temp
+        # folder, where the next run under the same name would overwrite them
+        # and the check for interrupted recordings would take them for one.
+        for kind, track in (("mic", recording.mic), ("sys", recording.sys)):
+            if track is None or not os.path.exists(track.path):
+                continue
+            if settings.keep_raw_tracks:
+                self._keep_raw_track(track, kind, out_dir, base_name)
+            else:
+                _try_remove(track.path)
 
         bridge.post(Finished(text=text, txt_path=txt_path, audio_path=mix_path))
+
+    def _keep_raw_track(self, track, kind, out_dir, base_name):
+        label = "microphone track" if kind == "mic" else "system track"
+        target = paths.raw_track_path(out_dir, base_name, kind)
+        try:
+            _move_file(track.path, target)
+        except OSError as exc:
+            # The transcript is done; failing the run over this would throw
+            # that away. The track stays where it was and is found again by
+            # the check for unfinished recordings.
+            self.bridge.post(Log(f"⚠ The {label} could not be kept ({exc}); "
+                                 f"it stays at {track.path}.\n"))
+            return
+        offset = ""
+        if track.start_offset_s > 0.005:
+            offset = (f", starts {track.start_offset_s:.2f} s after the other "
+                      f"track")
+        self.bridge.post(Log(
+            f"Kept the {label}: {os.path.basename(target)} "
+            f"({track.rate / 1000:g} kHz mono{offset})\n"))
 
     # ------------------------------------------------------------------
     def _live_results(self, recording, length):
@@ -327,20 +395,61 @@ class Finalizer(_ScratchFiles):
                 f"still has to run.\n"))
         return segments, tail_start
 
-    def _transcribe(self, path, kind):
-        backend = self.backend_factory(self.settings)
-        self._backends.append(backend)
+
+# ----------------------------------------------------------------------
+class ModelPrefetch:
+    """Fetches what the closing pass needs while the recording is running.
+
+    A model that is not on the computer yet was downloaded after the meeting:
+    with large-v3 that is 3 GB of waiting at the moment the transcript is
+    wanted, while the recording itself takes long enough to do it in the
+    meantime. The closing pass finds the files in place - or, if the download is
+    still going when it starts, waits on the same download (binaries.py locks
+    per file) instead of starting another.
+
+    A failure here is only a note: the closing pass tries again and reports a
+    real failure where it matters.
+    """
+
+    def __init__(self, bridge, settings, backend_factory=None):
+        self.bridge = bridge
+        self.settings = settings
+        self.backend_factory = backend_factory or (lambda s: build_backend(s))
+        self._backend = None
+        self._cancelled = threading.Event()
+        self._thread = None
+
+    def start(self):
+        """Begin in the background. Returns the thread, None if nothing is to fetch."""
+        if self.settings.uses_cloud():
+            return None
+        self._thread = threading.Thread(target=self._run, name="model-prefetch",
+                                        daemon=True)
+        self._thread.start()
+        return self._thread
+
+    def cancel(self):
+        self._cancelled.set()
+        backend = self._backend
+        if backend is not None:
+            try:
+                backend.cancel()
+            except Exception:
+                pass
+
+    def _run(self):
         try:
-            return backend.transcribe(
-                path,
-                language=self.settings.language,
-                log=lambda message: self.bridge.post(Log(message)),
-                track=kind,
-                progress=lambda message: self.bridge.post(Progress(message)),
-            )
-        finally:
-            if backend in self._backends:
-                self._backends.remove(backend)
+            self._backend = self.backend_factory(self.settings)
+            prepare = getattr(self._backend, "prepare", None)
+            if prepare is None or self._cancelled.is_set():
+                return
+            prepare(progress=lambda message: self.bridge.post(Progress(message)),
+                    log=lambda message: self.bridge.post(Log(message)))
+        except Exception as exc:
+            if not self._cancelled.is_set():
+                self.bridge.post(Log(
+                    f"Note: the model could not be fetched in the background "
+                    f"({exc}); it is tried again when the recording ends.\n"))
 
 
 # ----------------------------------------------------------------------
@@ -593,23 +702,11 @@ class LiveTranscriber:
 
 
 # ----------------------------------------------------------------------
-class FileFinalizer(_ScratchFiles):
+class FileFinalizer(_Worker):
     """Runs post-processing and transcription for an uploaded audio file in a worker thread."""
 
-    def __init__(self, bridge, settings, backend_factory=None):
-        self.bridge = bridge
-        self.settings = settings
-        self.backend_factory = backend_factory or (lambda s: build_backend(s))
-        self._backends = []
-        self._cancelled = threading.Event()
-
-    def cancel(self):
-        self._cancelled.set()
-        for backend in list(self._backends):
-            try:
-                backend.cancel()
-            except Exception:
-                pass
+    thread_name = "file-finalize"
+    failure_title = "Unexpected error during file processing"
 
     def run_async(self, file_path, base_name=None):
         if not base_name:
@@ -617,26 +714,9 @@ class FileFinalizer(_ScratchFiles):
             # extension itself. Stripping it here as well cut a second,
             # dot-separated piece off 'Team Meeting 2026.03.10.wav'.
             base_name = paths.safe_output_name(os.path.basename(file_path))
-        thread = threading.Thread(target=self._run, args=(file_path, base_name),
-                                  name="file-finalize", daemon=True)
-        thread.start()
-        return thread
+        return self._start(file_path, base_name)
 
-    def _run(self, file_path, base_name):
-        try:
-            self._process(file_path, base_name)
-        except TranscriptionError as exc:
-            self.bridge.post(Failed(message=str(exc)))
-        except Exception as exc:
-            self.bridge.post_exception("Unexpected error during file processing", exc)
-
-    def _process(self, file_path, base_name):
-        try:
-            self._process_file(file_path, base_name)
-        finally:
-            self._remove_scratch()
-
-    def _process_file(self, file_path, base_name):
+    def _work(self, file_path, base_name):
         bridge, settings = self.bridge, self.settings
         out_dir = settings.get_output_dir()
         os.makedirs(out_dir, exist_ok=True)
@@ -653,23 +733,32 @@ class FileFinalizer(_ScratchFiles):
 
         # Save audio file to output folder as 16 kHz PCM WAV
         mix_path = os.path.join(out_dir, f"{base_name}.wav")
-        sf.write(mix_path, dsp.limit_peak(audio), dsp.TARGET_RATE, subtype="PCM_16")
         duration_s = len(audio) / float(dsp.TARGET_RATE)
-        bridge.post(Log(f"Audio file loaded: {os.path.basename(mix_path)} ({duration_s:.1f} s)\n"))
+        if _same_file(file_path, mix_path):
+            # The file picked for upload IS the output audio - a recording
+            # chosen from the output folder. Converting it would replace it
+            # with a mono 16 kHz copy, which for the app's own recordings
+            # destroys the two channels (microphone left, system right) they
+            # consist of. It stays exactly as it is.
+            bridge.post(Log(f"Audio file loaded: {os.path.basename(mix_path)} "
+                            f"({duration_s:.1f} s) - left untouched\n"))
+        else:
+            sf.write(mix_path, dsp.limit_peak(audio), dsp.TARGET_RATE,
+                     subtype="PCM_16")
+            bridge.post(Log(f"Audio file loaded: {os.path.basename(mix_path)} "
+                            f"({duration_s:.1f} s)\n"))
 
         # Save normalized WAV into TMP_DIR for ASR
         asr_path = self._scratch_path("file", suffix=".asr.wav")
         sf.write(asr_path, dsp.normalize_for_asr(audio), dsp.TARGET_RATE, subtype="PCM_16")
 
-        if self._cancelled.is_set():
-            raise TranscriptionError("Processing cancelled.")
+        self._check_cancelled()
 
         bridge.post(Status("Transcribing audio file…", "purple"))
         bridge.post(Log("\n--- Transcription ---\n"))
         segments = self._transcribe(asr_path, "file")
 
-        if self._cancelled.is_set():
-            raise TranscriptionError("Processing cancelled.")
+        self._check_cancelled()
 
         bridge.post(Status("Building transcript…", "orange"))
         lines = []
@@ -686,22 +775,6 @@ class FileFinalizer(_ScratchFiles):
             handle.write(text + "\n")
 
         bridge.post(Finished(text=text, txt_path=txt_path, audio_path=mix_path))
-
-
-    def _transcribe(self, path, kind):
-        backend = self.backend_factory(self.settings)
-        self._backends.append(backend)
-        try:
-            return backend.transcribe(
-                path,
-                language=self.settings.language,
-                log=lambda message: self.bridge.post(Log(message)),
-                track=kind,
-                progress=lambda message: self.bridge.post(Progress(message)),
-            )
-        finally:
-            if backend in self._backends:
-                self._backends.remove(backend)
 
 
 # ----------------------------------------------------------------------
@@ -734,25 +807,35 @@ class LivePreview:
         self._thread.start()
 
     def stop(self):
+        """Ask the preview to end. Never waits for it.
+
+        This runs on the GUI thread. The thread used to be joined for up to five
+        seconds - a frozen window whenever it was in the middle of a model
+        download. It is a daemon and everything it can be busy with is
+        cancellable now: the whisper process is killed and a running download
+        looks at the cancel flag between blocks.
+        """
         self._stop.set()
-        if self._backend is not None:
+        backend = self._backend
+        if backend is not None:
             try:
-                self._backend.cancel()
+                backend.cancel()
             except Exception:
                 pass
-        if self._thread is not None:
-            self._thread.join(timeout=5.0)
-            self._thread = None
+        self._thread = None
 
     def _loop(self):
         preview_path = os.path.join(TMP_DIR, ".live_preview.wav")
         os.makedirs(TMP_DIR, exist_ok=True)
         self._backend = build_backend(self.settings, greedy=True, live=True)
+        if self._stop.is_set():
+            return          # stop() came first and had no backend to cancel yet
 
         try:
             self._backend.prepare(log=lambda m: self.bridge.post(Log(m)))
         except Exception as exc:
-            self.bridge.post(Log(f"Live preview unavailable: {exc}\n"))
+            if not self._stop.is_set():          # a cancel is not worth a line
+                self.bridge.post(Log(f"Live preview unavailable: {exc}\n"))
             return
 
         reported = False
@@ -850,3 +933,22 @@ def _try_remove(path):
         os.remove(path)
     except OSError:
         pass
+
+
+def _move_file(source, target):
+    """Rename, or copy and delete when the target is on another drive."""
+    try:
+        os.replace(source, target)
+    except OSError:
+        shutil.copyfile(source, target)
+        _try_remove(source)
+
+
+def _same_file(first, second):
+    """True if both paths are one existing file (links, case and short names
+    included). False when either does not exist - the normal case for a
+    target that is about to be written."""
+    try:
+        return os.path.samefile(first, second)
+    except OSError:
+        return False

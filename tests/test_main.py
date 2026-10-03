@@ -15,14 +15,22 @@ SCRIPT = textwrap.dedent("""
 
     order = []
 
+    class FakeApp:
+        def offer_recovery(self):
+            order.append("offer_recovery")
+
     class FakeRoot:
+        def after(self, _milliseconds, callback):
+            order.append("after")
+            callback()
+
         def mainloop(self):
             order.append("mainloop")
 
     patchers = [
         patch("tkinter.Tk", side_effect=lambda: order.append("Tk") or FakeRoot()),
         patch("audio_transcriber.ui.app.RecorderApp",
-              side_effect=lambda root: order.append("RecorderApp")),
+              side_effect=lambda root: order.append("RecorderApp") or FakeApp()),
         patch("audio_transcriber.paths.migrate_legacy_data",
               side_effect=lambda: order.append("migrate") or []),
     ]
@@ -45,8 +53,9 @@ class TestEntryPoint(unittest.TestCase):
         result = subprocess.run([sys.executable, "-c", SCRIPT], cwd=ROOT,
                                 capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(),
-                         "0 migrate,Tk,RecorderApp,mainloop")
+        self.assertEqual(
+            result.stdout.strip(),
+            "0 migrate,Tk,RecorderApp,after,offer_recovery,mainloop")
 
 
 if __name__ == "__main__":

@@ -13,6 +13,12 @@ from dataclasses import dataclass
 
 WASAPI_HOST_NAMES = ("WASAPI",)
 
+# A loopback name that is not "<playback name>..." still counts as the same
+# device if it shares at least this much of the playback name from the start:
+# an absolute minimum and a share of the name, whichever is larger.
+MIN_FUZZY_PREFIX = 12
+FUZZY_SHARE = 0.6
+
 
 @dataclass(frozen=True)
 class Device:
@@ -141,17 +147,27 @@ def find_loopback_for(devices, playback_device):
     for device in candidates:
         name = _normalize(device.name)
         # Loopback names are typically "<device name> [Loopback]"
-        score = _common_prefix_len(target, name)
-        if name.startswith(target):
-            score += 1000                      # exact prefix match
+        prefix = _common_prefix_len(target, name)
+        if name == target:
+            score = 2000 + prefix              # literally "<name> [Loopback]"
+        elif name.startswith(target):
+            score = 1000 + prefix              # starts with the playback name
+        elif prefix >= max(MIN_FUZZY_PREFIX, FUZZY_SHARE * len(target)):
+            score = prefix                     # same name, cut or reworded
+        else:
+            # A few shared letters are no match: "speakers (" is the start of
+            # every Windows speaker name, and accepting it picked the wrong
+            # device without a word whenever it was the only one left.
+            continue
         scored.append((score, device))
+
+    if not scored:
+        return None, (f"No matching loopback device was found for "
+                      f"'{playback_device.name}'. Please select the loopback "
+                      f"device directly.")
 
     scored.sort(key=lambda item: item[0], reverse=True)
     best_score, best = scored[0]
-
-    if best_score < 6:
-        return None, (f"No matching loopback device was found for "
-                      f"'{playback_device.name}'.")
 
     if len(scored) > 1 and scored[1][0] == best_score:
         return None, (f"The match for '{playback_device.name}' is ambiguous "

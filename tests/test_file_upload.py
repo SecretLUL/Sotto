@@ -223,6 +223,44 @@ class TestFileFinalizer(unittest.TestCase):
         self.assertEqual(os.path.basename(finished[0].audio_path),
                          "Meeting 03.10.2026.wav")
 
+    def test_uploading_a_file_from_the_output_folder_leaves_it_untouched(self):
+        """Regression: choosing the app's own stereo recording (microphone left,
+        system audio right) from the output folder replaced it with a mono
+        16 kHz copy - the channel separation was gone for good."""
+        rng = np.random.default_rng(1)
+        microphone = rng.normal(0, 0.2, 32000).astype(np.float32)
+        system = np.zeros(32000, dtype=np.float32)
+        source = os.path.join(self.out_dir, "my_meeting.wav")
+        sf.write(source, np.column_stack([microphone, system]), 16000,
+                 subtype="PCM_16")
+        with open(source, "rb") as handle:
+            before = handle.read()
+
+        bridge = TestMockBridge()
+        finalizer = FileFinalizer(bridge, Settings(output_dir=self.out_dir),
+                                  backend_factory=lambda s: TestMockBackend())
+        finalizer.run_async(source, base_name="my_meeting").join(timeout=5.0)
+
+        with open(source, "rb") as handle:
+            self.assertEqual(handle.read(), before, "the source was rewritten")
+        self.assertEqual(sf.info(source).channels, 2)
+        finished = [e for e in bridge.events if isinstance(e, Finished)]
+        self.assertEqual(len(finished), 1, bridge.events)
+        self.assertTrue(os.path.samefile(finished[0].audio_path, source))
+        self.assertTrue(os.path.exists(finished[0].txt_path))
+
+    def test_a_different_target_is_still_converted(self):
+        """The guard is for the very same file only."""
+        source = self._tone_file("original.wav")
+        bridge = TestMockBridge()
+        finalizer = FileFinalizer(bridge, Settings(output_dir=self.out_dir),
+                                  backend_factory=lambda s: TestMockBackend())
+        finalizer.run_async(source, base_name="converted").join(timeout=5.0)
+
+        converted = os.path.join(self.out_dir, "converted.wav")
+        self.assertEqual(sf.info(converted).samplerate, 16000)
+        self.assertEqual(sf.info(converted).channels, 1)
+
     def _tone_file(self, name="input.wav"):
         path = os.path.join(self.temp_dir, name)
         t = np.linspace(0, 2, 16000 * 2, dtype=np.float32)

@@ -68,6 +68,11 @@ def format_timestamp(seconds):
     return f"[{minutes:02d}:{secs:02d}]"
 
 
+def format_clock(seconds):
+    """'12:30', or '01:02:03' from one hour onwards - without the brackets."""
+    return format_timestamp(seconds)[1:-1]
+
+
 class TranscriptionError(RuntimeError):
     pass
 

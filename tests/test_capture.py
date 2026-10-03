@@ -3,6 +3,8 @@
 import itertools
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -13,7 +15,7 @@ from unittest.mock import patch
 import numpy as np
 import soundfile as sf
 
-from audio_transcriber.audio import capture, dsp
+from audio_transcriber.audio import capture, devices, dsp
 
 RATE = 48000
 BLOCK = capture.BLOCK_FRAMES
@@ -303,6 +305,228 @@ class TestCaptureTap(unittest.TestCase):
         self.assertIsNone(track.error)
         self.assertEqual(track.frames, 3 * BLOCK)
         self.assertIsNone(self.engine._tap)             # detached, not retried
+
+
+# ----------------------------------------------------------------------
+class FakeStream:
+    """A device that delivers `blocks` blocks at real-time pace, then dies."""
+
+    def __init__(self, blocks, rate=16000):
+        self.blocks = blocks
+        self.rate = rate
+
+    def start_stream(self):
+        pass
+
+    def stop_stream(self):
+        pass
+
+    def close(self):
+        pass
+
+    def read(self, frames, exception_on_overflow=False):
+        if self.blocks <= 0:
+            raise OSError("device unplugged")
+        self.blocks -= 1
+        time.sleep(frames / float(self.rate))
+        return np.full(frames, 0.1, dtype=np.float32).tobytes()
+
+
+class FakePortAudio:
+    def __init__(self, blocks=5, open_error=None):
+        self.blocks = blocks
+        self.open_error = open_error
+
+    def open(self, **_kwargs):
+        if self.open_error is not None:
+            raise self.open_error
+        return FakeStream(self.blocks)
+
+
+def usb_microphone():
+    return devices.Device(index=3, name="USB Microphone", host_api="WASAPI",
+                          max_input_channels=1, max_output_channels=0,
+                          default_rate=16000, is_loopback=False)
+
+
+class TestSourceFailure(unittest.TestCase):
+    """A source that stops delivering audio used to vanish without a word.
+
+    Its capture thread ended, the recording went on with the other track and the
+    dead one simply stopped; track.error was only ever read when Start failed.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.engine = None
+
+    def tearDown(self):
+        if self.engine is not None:
+            self.engine.stop_streams()
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _engine(self, **options):
+        self.engine = capture.AudioEngine(FakePortAudio(**options), self.dir)
+        return self.engine
+
+    @staticmethod
+    def _wait_for_error(engine, timeout=5.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if engine.stream_errors():
+                return True
+            time.sleep(0.02)
+        return False
+
+    def test_a_source_dying_mid_recording_is_noted_in_the_result(self):
+        engine = self._engine(blocks=5)
+        self.assertEqual(engine.configure(usb_microphone(), None), [])
+        engine.start_recording("take")
+        self.assertTrue(self._wait_for_error(engine))
+        result = engine.stop_recording()
+
+        self.assertTrue(result.has_audio, "what it delivered is kept")
+        notes = " ".join(result.warnings)
+        self.assertIn("USB Microphone", notes)
+        self.assertIn("stopped delivering audio", notes)
+        self.assertIn("device unplugged", notes)
+        self.assertIn("silent", notes)
+
+    def test_the_window_hears_about_it_once(self):
+        engine = self._engine(blocks=3)
+        engine.configure(usb_microphone(), None)
+        self.assertTrue(self._wait_for_error(engine))
+
+        first = engine.new_stream_errors()
+        self.assertEqual([kind for kind, _message in first], ["mic"])
+        self.assertIn("device unplugged", first[0][1])
+        self.assertEqual(engine.new_stream_errors(), [])
+
+    def test_a_stream_that_cannot_be_opened_is_not_reported_twice(self):
+        engine = self._engine(open_error=OSError("device busy"))
+        warnings = engine.configure(usb_microphone(), None)
+
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("could not be opened", warnings[0])
+        self.assertEqual(engine.new_stream_errors(), [],
+                         "configure() already returned it as a warning")
+
+    def test_a_healthy_recording_gets_no_failure_note(self):
+        engine = self._engine(blocks=10_000)
+        engine.configure(usb_microphone(), None)
+        engine.start_recording("take")
+        time.sleep(0.4)
+        result = engine.stop_recording()
+        self.assertFalse([w for w in result.warnings if "stopped delivering" in w])
+        self.assertEqual(engine.new_stream_errors(), [])
+
+
+# ----------------------------------------------------------------------
+class TestUnfinishedRecordings(unittest.TestCase):
+    """Raw tracks that never reached a transcript can be found and processed."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _raw(self, base, kind, seconds=2.0, rate=RATE, age_s=0.0):
+        path = os.path.join(self.dir, f"{base}.{kind}.raw.wav")
+        data = np.random.default_rng(0).normal(0, 0.1, int(seconds * rate))
+        sf.write(path, data.astype(np.float32), rate, subtype="PCM_16")
+        if age_s:
+            moment = time.time() - age_s
+            os.utime(path, (moment, moment))
+        return path
+
+    def test_tracks_are_grouped_by_recording(self):
+        self._raw("Meeting 03.10.2026", "mic", seconds=2.0)
+        self._raw("Meeting 03.10.2026", "sys", seconds=3.0)
+        self._raw("other", "mic")
+        found = capture.find_unfinished(self.dir)
+
+        self.assertEqual(sorted(item.base_name for item in found),
+                         ["Meeting 03.10.2026", "other"])
+        meeting = next(item for item in found
+                       if item.base_name == "Meeting 03.10.2026")
+        self.assertEqual(sorted(meeting.tracks), ["mic", "sys"])
+        self.assertAlmostEqual(meeting.duration_s, 3.0, places=2)
+        self.assertEqual(meeting.tracks["mic"].rate, RATE)
+
+    def test_the_newest_comes_first(self):
+        self._raw("old", "mic", age_s=3600)
+        self._raw("new", "mic")
+        self._raw("middle", "mic", age_s=60)
+        self.assertEqual([item.base_name for item in capture.find_unfinished(self.dir)],
+                         ["new", "middle", "old"])
+
+    def test_recordings_in_use_are_left_out(self):
+        self._raw("running", "mic")
+        self._raw("waiting", "mic")
+        found = capture.find_unfinished(self.dir, exclude={"running"})
+        self.assertEqual([item.base_name for item in found], ["waiting"])
+
+    def test_empty_foreign_scratch_and_kept_files_are_ignored(self):
+        sf.write(os.path.join(self.dir, "empty.mic.raw.wav"),
+                 np.zeros(0, dtype=np.float32), RATE, subtype="PCM_16")
+        with open(os.path.join(self.dir, "notes.txt"), "w") as handle:
+            handle.write("x")
+        with open(os.path.join(self.dir, "broken.mic.raw.wav"), "wb") as handle:
+            handle.write(b"not audio at all")
+        for name in ("mic-3f9a1c2e7b.asr.wav", "done.mic.wav", "x.raw.wav"):
+            sf.write(os.path.join(self.dir, name),
+                     np.ones(1000, dtype=np.float32) * 0.1, RATE, subtype="PCM_16")
+        self.assertEqual(capture.find_unfinished(self.dir), [])
+
+    def test_a_missing_folder_is_not_an_error(self):
+        self.assertEqual(capture.find_unfinished(os.path.join(self.dir, "nope")), [])
+
+    def test_a_track_that_was_never_closed_is_still_found(self):
+        """The recording process died: the WAV was never closed, its header
+        never finished. libsndfile reads the data up to the end of the file."""
+        path = os.path.join(self.dir, "crashed.mic.raw.wav")
+        script = "; ".join([
+            "import os, numpy as np, soundfile as sf",
+            f"f = sf.SoundFile({path!r}, mode='w', samplerate=48000, channels=1, "
+            f"subtype='PCM_16')",
+            "[f.write(np.full(1024, 0.1, dtype='float32')) for _ in range(50)]",
+            "os._exit(1)",                     # killed: never closed
+        ])
+        subprocess.run([sys.executable, "-c", script], check=False)
+
+        found = capture.find_unfinished(self.dir)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].tracks["mic"].frames, 50 * 1024)
+
+    def test_the_finalizer_gets_a_ready_made_recording(self):
+        self._raw("meeting", "mic", seconds=2.0)
+        self._raw("meeting", "sys", seconds=2.0)
+        unfinished = capture.find_unfinished(self.dir)[0]
+        recording = capture.recording_from_unfinished(unfinished)
+
+        self.assertTrue(recording.has_audio)
+        self.assertEqual(recording.mic.start_offset_s, 0.0)
+        self.assertIn("Recovered", recording.warnings[0])
+        audio = capture.load_track(recording.mic)
+        self.assertAlmostEqual(len(audio) / dsp.TARGET_RATE, 2.0, places=1)
+
+    def test_removing_deletes_the_tracks(self):
+        mic = self._raw("meeting", "mic")
+        sys_track = self._raw("meeting", "sys")
+        capture.remove_unfinished(capture.find_unfinished(self.dir)[0])
+        self.assertFalse(os.path.exists(mic))
+        self.assertFalse(os.path.exists(sys_track))
+        self.assertEqual(capture.find_unfinished(self.dir), [])
+
+    def test_an_empty_recording_discards_its_files(self):
+        path = os.path.join(self.dir, "empty.mic.raw.wav")
+        sf.write(path, np.zeros(0, dtype=np.float32), RATE, subtype="PCM_16")
+        recording = capture.RecordingResult(
+            mic=capture.TrackResult(path=path, rate=RATE, frames=0))
+        self.assertFalse(recording.has_audio)
+        recording.discard()
+        self.assertFalse(os.path.exists(path))
 
 
 if __name__ == "__main__":

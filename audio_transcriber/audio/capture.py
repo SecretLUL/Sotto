@@ -24,6 +24,7 @@ are collected and reported at start.
 
 import math
 import os
+import re
 import threading
 import time
 from collections import deque
@@ -32,7 +33,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import soundfile as sf
 
-from . import dsp
+from . import dsp, stream
 
 BLOCK_FRAMES = 1024
 LIVE_WINDOW_S = 30.0
@@ -87,6 +88,15 @@ class RecordingResult:
         return any(track is not None and track.frames > 0
                    for track in (self.mic, self.sys))
 
+    def discard(self):
+        """Delete the track files - an empty recording is not worth recovering."""
+        for track in (self.mic, self.sys):
+            if track is not None:
+                try:
+                    os.remove(track.path)
+                except OSError:
+                    pass
+
 
 class _Track:
     """Internal state of a running track."""
@@ -109,6 +119,14 @@ class _Track:
         self.surplus = 0
         self.first_block_at = None
         self.error = None
+        self.error_at = None             # perf_counter() of the first error
+        self.error_reported = False      # handed out by new_stream_errors()
+
+    def fail(self, message):
+        """Remember why this track stopped - the first reason is the real one."""
+        if self.error is None:
+            self.error = message
+            self.error_at = time.perf_counter()
 
 
 class AudioEngine:
@@ -190,6 +208,22 @@ class AudioEngine:
     def stream_errors(self):
         return [track.error for track in self._tracks.values() if track.error]
 
+    def new_stream_errors(self):
+        """(kind, message) for every stream error not handed out yet - once each.
+
+        A source that stops delivering audio (USB microphone pulled, device
+        switched away) ends its capture thread and nothing else: the recording
+        goes on with the other track and the one that died simply stops. The
+        window polls this so it can say so while it is still happening, not
+        only in the notes after Stop.
+        """
+        fresh = []
+        for track in list(self._tracks.values()):
+            if track.error and not track.error_reported:
+                track.error_reported = True
+                fresh.append((track.kind, track.error))
+        return fresh
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -221,9 +255,11 @@ class AudioEngine:
                         track.stream = self._open_stream(track)
                         opened.append(track)
                     except Exception as exc:
-                        track.error = (
+                        track.fail(
                             f"{'Microphone' if kind == 'mic' else 'System audio'} "
                             f"'{device.name}' could not be opened: {exc}")
+                        # Returned to the caller below: do not report it twice.
+                        track.error_reported = True
                         warnings.append(track.error)
                     tracks[kind] = track
 
@@ -337,6 +373,20 @@ class AudioEngine:
                 device_name=track.device.name,
             ))
 
+        for track in self._tracks.values():
+            # A source that died mid-recording: its file just ends there and
+            # the finalizer pads the rest with silence - say so.
+            if track.error and track.path:
+                if track.first_block_at is None:
+                    when = "never delivered any audio"
+                else:
+                    when = (f"stopped delivering audio "
+                            f"{_mmss(track.error_at - track.first_block_at)} "
+                            f"into the recording")
+                result.warnings.append(
+                    f"'{track.device.name}' {when} ({track.error}). "
+                    f"The rest of that track is silent.")
+
         for track_result in (result.mic, result.sys):
             if track_result is None:
                 continue
@@ -396,7 +446,7 @@ class AudioEngine:
                 try:
                     data = track.stream.read(BLOCK_FRAMES, exception_on_overflow=False)
                 except Exception as exc:
-                    track.error = f"Read error on '{track.device.name}': {exc}"
+                    track.fail(f"Read error on '{track.device.name}': {exc}")
                     break
                 if not data:
                     continue
@@ -437,9 +487,15 @@ class AudioEngine:
                     track.frames += len(mono)
                     self._emit(track, mono)
         except Exception as exc:                # pragma: no cover
-            track.error = f"Capture thread '{track.device.name}': {exc}"
+            track.fail(f"Capture thread '{track.device.name}': {exc}")
         finally:
             track.level = 0.0
+
+
+def _mmss(seconds):
+    """'12:30' - minutes keep counting past an hour."""
+    total = max(0, int(seconds))
+    return f"{total // 60:02d}:{total % 60:02d}"
 
 
 # ----------------------------------------------------------------------
@@ -452,12 +508,96 @@ def load_track(track_result, target_rate=dsp.TARGET_RATE):
     if track_result is None or not os.path.exists(track_result.path):
         return np.zeros(0, dtype=np.float32)
 
-    data, rate = sf.read(track_result.path, dtype="float32", always_2d=False)
-    if data.ndim > 1:
-        data = data.mean(axis=1)
-
-    resampled = dsp.resample(data, rate, target_rate)
+    # Chunk by chunk: a raw track at its native rate is about 700 MB per hour,
+    # and the whole of it used to sit in memory next to its resampled copy.
+    resampled = stream.read_mono_resampled(track_result.path, target_rate)
     pad = int(round(track_result.start_offset_s * target_rate))
     if pad > 0:
         resampled = np.concatenate([np.zeros(pad, dtype=np.float32), resampled])
     return resampled
+
+
+# ----------------------------------------------------------------------
+# Recordings that were interrupted
+# ----------------------------------------------------------------------
+_RAW_NAME = re.compile(r"^(?P<base>.+)\.(?P<kind>mic|sys)\.raw\.wav$")
+
+
+@dataclass
+class UnfinishedRecording:
+    """Raw tracks in the temp folder that never made it into a transcript.
+
+    That is a recording cut short (window closed, crash, power cut) or one whose
+    processing failed - the raw tracks are only deleted after success, and with
+    "Keep raw tracks" they are moved to the output folder, so anything still
+    sitting here was never finished.
+    """
+    base_name: str
+    tracks: dict                     # "mic" | "sys" -> TrackResult
+    modified: float = 0.0            # newest write time, seconds since the epoch
+
+    @property
+    def duration_s(self):
+        return max((track.duration_s for track in self.tracks.values()),
+                   default=0.0)
+
+
+def find_unfinished(tmp_dir, exclude=()):
+    """The interrupted recordings in `tmp_dir`, newest first.
+
+    `exclude` holds base names that are in use right now (the recording being
+    made, the one being processed). Files without audio are ignored; a track
+    that was not closed properly is still readable - libsndfile takes the data
+    up to the end of the file.
+    """
+    try:
+        names = os.listdir(tmp_dir)
+    except OSError:
+        return []
+
+    found = {}
+    for name in names:
+        match = _RAW_NAME.match(name)
+        if match is None or match.group("base") in exclude:
+            continue
+        path = os.path.join(tmp_dir, name)
+        try:
+            info = sf.info(path)
+            modified = os.path.getmtime(path)
+        except (RuntimeError, OSError):
+            continue                          # not audio / vanished meanwhile
+        if info.frames <= 0:
+            continue
+        recording = found.setdefault(
+            match.group("base"), UnfinishedRecording(match.group("base"), {}))
+        recording.tracks[match.group("kind")] = TrackResult(
+            path=path, rate=info.samplerate, frames=info.frames,
+            device_name="recovered")
+        recording.modified = max(recording.modified, modified)
+
+    return sorted(found.values(), key=lambda item: item.modified, reverse=True)
+
+
+def recording_from_unfinished(unfinished):
+    """A RecordingResult the finalizer can process, built from the files alone.
+
+    What was only known while recording - the start offset between the two
+    tracks - is gone, so they are lined up at the start of their files; a
+    stream that began a little later than the other will be that much off.
+    """
+    result = RecordingResult(
+        mic=unfinished.tracks.get("mic"), sys=unfinished.tracks.get("sys"))
+    result.warnings.append(
+        "Recovered from an interrupted recording. The exact start offset "
+        "between the two tracks is unknown, so they are aligned at the start "
+        "of their files.")
+    return result
+
+
+def remove_unfinished(unfinished):
+    """Delete the raw tracks of an interrupted recording."""
+    for track in unfinished.tracks.values():
+        try:
+            os.remove(track.path)
+        except OSError:
+            pass

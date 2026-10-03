@@ -74,6 +74,35 @@ class TestReservedDeviceNames(unittest.TestCase):
                 self.assertEqual(paths.safe_output_name(raw), raw)
 
 
+class TestRawTrackNames(unittest.TestCase):
+    """What a recording writes, so the overwrite check knows about all of it."""
+
+    def test_an_upload_writes_two_files_a_recording_with_raw_tracks_four(self):
+        self.assertEqual(paths.output_extensions(), (".wav", ".txt"))
+        self.assertEqual(paths.output_extensions(keep_raw_tracks=True),
+                         (".wav", ".txt", ".mic.wav", ".sys.wav"))
+
+    def test_raw_tracks_sit_next_to_the_transcript(self):
+        self.assertEqual(
+            paths.raw_track_path("out", "Meeting 03.10.2026", "sys"),
+            os.path.join("out", "Meeting 03.10.2026.sys.wav"))
+
+    def test_a_free_number_has_to_clear_the_raw_tracks_too(self):
+        folder = tempfile.mkdtemp()
+        try:
+            for name in ("my_meeting.wav", "my_meeting_2.mic.wav"):
+                with open(os.path.join(folder, name), "wb"):
+                    pass
+            self.assertEqual(paths.next_free_name(folder, "my_meeting"),
+                             "my_meeting_2")
+            self.assertEqual(
+                paths.next_free_name(folder, "my_meeting",
+                                     paths.output_extensions(True)),
+                "my_meeting_3")
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+
 class TestScratchName(unittest.TestCase):
     """whisper-cli cannot open files named in Turkish or Arabic (ANSI argv)."""
 
@@ -233,12 +262,12 @@ class TestResolveDataDir(unittest.TestCase):
 class TestWritableProbe(unittest.TestCase):
     def test_a_real_directory_is_writable_and_stays_clean(self):
         with tempfile.TemporaryDirectory() as folder:
-            self.assertTrue(paths._is_writable(folder))
+            self.assertTrue(paths.is_writable(folder))
             self.assertEqual(os.listdir(folder), [])
 
     def test_a_missing_directory_is_not(self):
         with tempfile.TemporaryDirectory() as folder:
-            self.assertFalse(paths._is_writable(os.path.join(folder, "missing")))
+            self.assertFalse(paths.is_writable(os.path.join(folder, "missing")))
 
     @unittest.skipUnless(os.name == "nt", "os.access() only misleads on Windows")
     def test_program_files_is_refused_at_once(self):
@@ -251,7 +280,7 @@ class TestWritableProbe(unittest.TestCase):
 
         outcome = []
         worker = threading.Thread(
-            target=lambda: outcome.append(paths._is_writable(folder)), daemon=True)
+            target=lambda: outcome.append(paths.is_writable(folder)), daemon=True)
         worker.start()
         worker.join(timeout=5.0)
 

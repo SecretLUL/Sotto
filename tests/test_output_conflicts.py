@@ -101,9 +101,10 @@ class TestConflictResolutionInTheApp(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.out_dir, ignore_errors=True)
 
-    def _resolve(self, base_name):
+    def _resolve(self, base_name, extensions=None):
         from audio_transcriber.ui.app import RecorderApp
-        return RecorderApp._resolve_output_conflict(self.app, base_name)
+        return RecorderApp._resolve_output_conflict(self.app, base_name,
+                                                    extensions)
 
     def test_a_free_name_never_opens_the_dialog(self):
         with patch("audio_transcriber.ui.app.dialogs.ask_output_conflict") as ask:
@@ -116,13 +117,29 @@ class TestConflictResolutionInTheApp(unittest.TestCase):
                    return_value="my_meeting_2") as ask:
             self.assertEqual(self._resolve("my_meeting"), "my_meeting_2")
         ask.assert_called_once()
-        self.assertEqual(ask.call_args[0][1:], (self.out_dir, "my_meeting"))
+        self.assertEqual(ask.call_args[0][1:3], (self.out_dir, "my_meeting"))
 
     def test_cancelling_aborts_the_run(self):
         _touch(self.out_dir, "my_meeting.txt")
         with patch("audio_transcriber.ui.app.dialogs.ask_output_conflict",
                    return_value=None):
             self.assertIsNone(self._resolve("my_meeting"))
+
+    def test_a_kept_raw_track_counts_as_a_conflict_for_a_recording(self):
+        """With 'Keep raw tracks' a recording also writes name.mic.wav and
+        name.sys.wav, so an old one of those must trigger the question - while
+        an upload, which never writes them, is not bothered by it."""
+        _touch(self.out_dir, "my_meeting.mic.wav")
+        recording = paths.output_extensions(keep_raw_tracks=True)
+        with patch("audio_transcriber.ui.app.dialogs.ask_output_conflict",
+                   return_value="my_meeting_2") as ask:
+            self.assertEqual(self._resolve("my_meeting", recording), "my_meeting_2")
+        ask.assert_called_once()
+        self.assertEqual(ask.call_args[0][3], recording)
+
+        with patch("audio_transcriber.ui.app.dialogs.ask_output_conflict") as ask:
+            self.assertEqual(self._resolve("my_meeting"), "my_meeting")   # upload
+        ask.assert_not_called()
 
 
 if __name__ == "__main__":

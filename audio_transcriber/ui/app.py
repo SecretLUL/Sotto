@@ -22,31 +22,50 @@ try:
 except ImportError:
     import pyaudio
 
-from .. import config, paths, pipeline
+from .. import config, paths, pipeline, preflight
+from ..audio import capture
 from ..audio import devices as devmod
 from ..audio.capture import AudioEngine
 from ..events import (Failed, Finished, LivePreview, Log, Progress, Status,
                       UiBridge)
+from ..transcribe.base import format_clock
 from . import dialogs, icons
 from . import theme as T
 from . import widgets as W
 
 METER_INTERVAL_MS = 40
 
+# The window, designed for a 96 dpi screen: what it opens at, and the least it
+# may be shrunk to. Both are scaled with the display and kept within the screen
+# (_size_window); they used to be fixed pixel counts - 900 high at the least,
+# which does not fit a 1366x768 laptop at all.
+WINDOW_SIZE = (920, 980)
+WINDOW_MIN_SIZE = (700, 600)
+# What the screen keeps for itself: window frame, title bar, taskbar.
+SCREEN_MARGIN = (24, 96)
+
 # How long Start waits for an in-flight device reconfiguration before giving up
 # and letting the engine report whatever is actually wrong. configure() joins
 # its reader threads with a 2 s timeout each, so this leaves room for both.
 DEVICE_READY_TIMEOUT_S = 6.0
+
+# What the key field says about its key. The second is for systems without the
+# Windows DPAPI, where the key cannot be stored at all - the hint used to claim
+# the encryption there as well.
+KEY_HINT_STORED = ("Encrypted with the Windows DPAPI and bound to your user "
+                   "account — never stored in clear text.")
+KEY_HINT_SESSION = ("This system has no secure place for the key, so it is kept "
+                    "only until you close the app. Set the ELEVENLABS_API_KEY "
+                    "environment variable to keep it.")
 
 
 class RecorderApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Audio AI Recorder")
-        self.root.geometry("920x980")
-        self.root.minsize(840, 900)
 
-        T.apply(root)
+        T.apply(root)                    # first: it sets the display scaling
+        self._size_window()
 
         self.settings, warnings = config.load()
         self.pa = pyaudio.PyAudio()
@@ -58,6 +77,11 @@ class RecorderApp:
         self.live_preview = None
         self.recording_base_name = None
         self.recording_started_at = None
+        self._run_settings = None        # the copy of the settings a run works on
+        self._prefetch = None            # fetches the model while recording
+        self._work_thread = None         # the finalizer thread of the current run
+        self._processing_base = None     # raw-track name of a recovered recording
+        self._unfinished = []            # what find_unfinished() saw last
         self._monitor_thread = None
         self._start_deadline = 0.0
         self._shutting_down = False
@@ -68,10 +92,11 @@ class RecorderApp:
         self._build()
         self._wire_events()
         self.bridge.start()
+        self._refresh_recovery_banner()
 
         for warning in warnings:
             self.transcript.append(f"⚠ {warning}\n")
-        if self.settings.migrated_plaintext_key:
+        if self.settings.migrated_plaintext_key and config.key_can_be_stored():
             self.transcript.append(
                 "→ The key will be stored encrypted the next time you save.\n\n")
 
@@ -83,6 +108,17 @@ class RecorderApp:
     # ==================================================================
     # Construction
     # ==================================================================
+    def _size_window(self):
+        """Open at a size that suits this screen and its display scaling."""
+        room = (max(1, self.root.winfo_screenwidth() - T.px(SCREEN_MARGIN[0])),
+                max(1, self.root.winfo_screenheight() - T.px(SCREEN_MARGIN[1])))
+        width, height = (min(T.px(wanted), available)
+                         for wanted, available in zip(WINDOW_SIZE, room))
+        least = (min(T.px(WINDOW_MIN_SIZE[0]), width),
+                 min(T.px(WINDOW_MIN_SIZE[1]), height))
+        self.root.geometry(f"{width}x{height}")
+        self.root.minsize(*least)
+
     def _build(self):
         outer = tk.Frame(self.root, bg=T.BG)
         outer.pack(fill=tk.BOTH, expand=True, padx=T.XL, pady=(T.LG, T.LG))
@@ -100,15 +136,19 @@ class RecorderApp:
         self.notebook.add(self.tab_settings, text="  ⚙️ Settings  ")
         self.notebook.add(self.tab_transcript, text="  📄 Transcript  ")
 
-        # Tab 1: Recorder
-        recorder_container = tk.Frame(self.tab_recorder, bg=T.BG)
-        recorder_container.pack(fill=tk.BOTH, expand=True, pady=(T.SM, 0))
+        # Tab 1: Recorder. The first two tabs scroll where the screen cannot
+        # give the window their full height (W.Scroller).
+        recorder_page = W.Scroller(self.tab_recorder)
+        recorder_page.pack(fill=tk.BOTH, expand=True, pady=(T.SM, 0))
+        recorder_container = recorder_page.body
+        self._build_recovery_banner(recorder_container)
         self._build_sources(recorder_container)
         self._build_record_bar(recorder_container)
 
         # Tab 2: Settings
-        settings_container = tk.Frame(self.tab_settings, bg=T.BG)
-        settings_container.pack(fill=tk.BOTH, expand=True, pady=(T.SM, 0))
+        settings_page = W.Scroller(self.tab_settings)
+        settings_page.pack(fill=tk.BOTH, expand=True, pady=(T.SM, 0))
+        settings_container = settings_page.body
         self._build_ai(settings_container)
         self._build_output_folder(settings_container)
         self._build_options_card(settings_container)
@@ -126,7 +166,7 @@ class RecorderApp:
         left = tk.Frame(head, bg=T.BG)
         left.pack(side=tk.LEFT)
 
-        self._icon_refs["logo"] = icons.get_icon("app_logo", size=42)
+        self._icon_refs["logo"] = icons.get_icon("app_logo", size=T.px(42))
         tk.Label(left, image=self._icon_refs["logo"], bg=T.BG).pack(
             side=tk.LEFT, padx=(0, T.MD))
 
@@ -138,10 +178,28 @@ class RecorderApp:
             text_frame, bg=T.BG, fg=T.TEXT_MUTE, font=T.fonts["small"], anchor="w",
             text=f"whisper.cpp · {self.settings.threads()} threads · "
                  f"ElevenLabs Scribe")
-        self.subtitle.pack(anchor="w", pady=(2, 0))
+        self.subtitle.pack(anchor="w", pady=(T.px(2), 0))
 
         self.status = W.StatusPill(head, bg=T.BG, width=260, height=36)
         self.status.pack(side=tk.RIGHT, anchor="e")
+
+    # ------------------------------------------------------------------
+    def _build_recovery_banner(self, parent):
+        """A line above the sources while an interrupted recording is waiting.
+
+        Built but not packed: _refresh_recovery_banner() shows it only when
+        there is something to recover.
+        """
+        self.recovery_banner = W.Card(parent)
+        body = self.recovery_banner.body
+        body.columnconfigure(0, weight=1)
+        self.recovery_label = W.WrapLabel(body, bg=T.CARD, fg=T.WARN,
+                                          font=T.fonts["small"])
+        self.recovery_label.grid(row=0, column=0, sticky="ew")
+        self.recover_btn = W.Button(body, text="Recover…", kind="accent",
+                                    width=120, height=32,
+                                    command=self.offer_recovery)
+        self.recover_btn.grid(row=0, column=1, padx=(T.MD, 0))
 
     # ------------------------------------------------------------------
     def _build_sources(self, parent):
@@ -167,7 +225,7 @@ class RecorderApp:
         head.grid(row=row, column=0, columnspan=3, sticky="ew")
         head.columnconfigure(1, weight=1)
 
-        self._icon_refs[f"src_{row}"] = icons.get_icon(icon_name, size=26)
+        self._icon_refs[f"src_{row}"] = icons.get_icon(icon_name, size=T.px(26))
         tk.Label(head, image=self._icon_refs[f"src_{row}"], bg=T.CARD).grid(
             row=0, column=0, sticky="w", padx=(0, T.SM))
         tk.Label(head, text=label, bg=T.CARD, fg=T.TEXT_DIM,
@@ -176,7 +234,7 @@ class RecorderApp:
 
         combo = ttk.Combobox(head, state="readonly", style="Dark.TCombobox",
                              font=T.fonts["body"])
-        combo.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(6, 6))
+        combo.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(T.px(6), T.px(6)))
         combo.bind("<<ComboboxSelected>>", lambda _e: self.restart_monitoring())
 
         meter = W.Meter(head, width=560, height=18)
@@ -184,7 +242,7 @@ class RecorderApp:
 
 
         gain_row = tk.Frame(head, bg=T.CARD)
-        gain_row.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(5, 0))
+        gain_row.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(T.px(5), 0))
         gain_row.columnconfigure(1, weight=1)
         tk.Label(gain_row, text="Gain", bg=T.CARD, fg=T.TEXT_MUTE,
                  font=T.fonts["tiny"], width=5, anchor="w").grid(row=0, column=0)
@@ -208,7 +266,7 @@ class RecorderApp:
             p, [choice[0] for choice in config.MODEL_CHOICES]), icon_name="brain")
         model_field.grid(row=0, column=0, sticky="ew", padx=(0, T.MD))
         self.model_combo = model_field.widget
-        self.model_combo.current(self.settings.model_index)
+        self.model_combo.current(config.model_index(self.settings.model))
         self.model_combo.bind("<<ComboboxSelected>>",
                               lambda _e: self._refresh_key_state())
 
@@ -228,8 +286,8 @@ class RecorderApp:
             key_wrap, "ElevenLabs API key",
             lambda p: ttk.Entry(p, show="•", style="Dark.TEntry",
                                 font=T.fonts["body"]),
-            hint="Encrypted with the Windows DPAPI and bound to your user "
-                 "account — never stored in clear text.", icon_name="lock")
+            hint=KEY_HINT_STORED if config.key_can_be_stored() else KEY_HINT_SESSION,
+            icon_name="lock")
         self.key_field.grid(row=0, column=0, sticky="ew")
         self.api_entry = self.key_field.widget
         self.api_entry.insert(0, self.settings.api_key)
@@ -238,7 +296,7 @@ class RecorderApp:
                                      kind="ghost", width=84, height=32,
                                      command=self._toggle_key)
         self.show_key_btn.grid(row=0, column=1, sticky="n",
-                               padx=(T.SM, 0), pady=(22, 0))
+                               padx=(T.SM, 0), pady=(T.px(22), 0))
         self._key_visible = False
 
     # ------------------------------------------------------------------
@@ -266,12 +324,12 @@ class RecorderApp:
         browse_btn = W.Button(wrap, text="Browse...", icon_name="upload",
                               kind="quiet", width=100, height=32,
                               command=self._browse_output_dir)
-        browse_btn.grid(row=0, column=1, sticky="s", padx=(T.SM, 0), pady=(22, 0))
+        browse_btn.grid(row=0, column=1, sticky="s", padx=(T.SM, 0), pady=(T.px(22), 0))
 
         reset_btn = W.Button(wrap, text="Reset", kind="ghost",
                              width=74, height=32,
                              command=self._reset_output_dir)
-        reset_btn.grid(row=0, column=2, sticky="s", padx=(T.XS, 0), pady=(22, 0))
+        reset_btn.grid(row=0, column=2, sticky="s", padx=(T.XS, 0), pady=(T.px(22), 0))
 
     def _browse_output_dir(self):
         current = self.output_dir_entry.get().strip() or self.settings.get_output_dir()
@@ -297,37 +355,40 @@ class RecorderApp:
 
         options = tk.Frame(body, bg=T.CARD)
         options.grid(row=0, column=0, sticky="ew")
+        options.columnconfigure(0, weight=1)
 
         self.live_var = tk.BooleanVar(value=self.settings.live_transcribe)
         self.preview_var = tk.BooleanVar(value=self.settings.live_preview)
         self.separate_var = tk.BooleanVar(value=self.settings.separate_tracks)
         self.vad_var = tk.BooleanVar(value=self.settings.use_vad)
+        self.gpu_var = tk.BooleanVar(value=self.settings.use_gpu)
         self.keep_raw_var = tk.BooleanVar(value=self.settings.keep_raw_tracks)
 
-        W.Switch(options, "Live transcription", self.live_var).grid(
-            row=0, column=0, sticky="w")
-        W.Switch(options, "Live preview", self.preview_var).grid(
-            row=0, column=1, sticky="w", padx=(T.MD, 0))
-        W.Switch(options, "Separate tracks", self.separate_var).grid(
-            row=0, column=2, sticky="w", padx=(T.MD, 0))
-        W.Switch(options, "VAD", self.vad_var).grid(
-            row=0, column=3, sticky="w", padx=(T.MD, 0))
-        W.Switch(options, "Keep raw tracks", self.keep_raw_var).grid(
-            row=1, column=0, sticky="w", pady=(T.SM, 0))
-
-        tk.Label(options,
-                 text="Live transcription recognises the recording while it "
-                      "runs, so stopping only has to catch up with the last "
-                      "few seconds. Local models only.",
-                 bg=T.CARD, fg=T.TEXT_MUTE, font=T.fonts["tiny"],
-                 anchor="w", justify="left").grid(
-            row=2, column=0, columnspan=4, sticky="w", pady=(T.SM, 0))
+        # The switches wrap onto a second line where the width runs out, and
+        # the hint below wraps too: six switches in grid columns plus a long
+        # one-line hint pushed the last of them out of the window.
+        switches = W.Flow(options)
+        switches.grid(row=0, column=0, sticky="ew")
+        for caption, variable in (("Live transcription", self.live_var),
+                                  ("Live preview", self.preview_var),
+                                  ("Separate tracks", self.separate_var),
+                                  ("VAD", self.vad_var),
+                                  ("Keep raw tracks", self.keep_raw_var),
+                                  ("GPU", self.gpu_var)):
+            switches.add(W.Switch(switches, caption, variable))
 
         self.save_settings_btn = W.Button(options, text="Save settings",
                                           kind="ghost", width=150, height=32,
                                           command=self.save_settings)
-        self.save_settings_btn.grid(row=0, column=4, sticky="e", padx=(T.MD, 0))
-        options.columnconfigure(4, weight=1)
+        self.save_settings_btn.grid(row=0, column=1, sticky="ne", padx=(T.MD, 0))
+
+        W.WrapLabel(options,
+                    text="Live transcription recognises the recording while it "
+                         "runs, so stopping only has to catch up with the last "
+                         "few seconds. Local models only. GPU lets whisper.cpp "
+                         "use the graphics card where its build supports that; "
+                         "if a run fails there it is repeated on the CPU.").grid(
+            row=1, column=0, columnspan=2, sticky="ew", pady=(T.SM, 0))
 
 
     # ------------------------------------------------------------------
@@ -346,23 +407,23 @@ class RecorderApp:
         self.timer_label = tk.Label(body, text="00:00", bg=T.CARD,
                                     fg=T.TEXT_MUTE, font=T.fonts["display"])
         self.timer_label.grid(row=0, column=1, sticky="s", padx=(0, T.LG),
-                              pady=(0, 2))
+                              pady=(0, T.px(2)))
 
         self.upload_btn = W.Button(body, text="Upload file", icon_name="upload",
                                    kind="quiet", width=130, height=42,
                                    command=self.upload_and_transcribe)
-        self.upload_btn.grid(row=0, column=2, sticky="s", padx=(0, T.SM), pady=(0, 1))
+        self.upload_btn.grid(row=0, column=2, sticky="s", padx=(0, T.SM), pady=(0, T.px(1)))
 
         self.start_btn = W.Button(body, text="Start recording", icon_name="record",
                                   kind="record", width=170, height=42,
                                   command=self.start_recording)
-        self.start_btn.grid(row=0, column=3, sticky="s", pady=(0, 1))
+        self.start_btn.grid(row=0, column=3, sticky="s", pady=(0, T.px(1)))
 
         self.stop_btn = W.Button(body, text="Stop", icon_name="stop", kind="stop",
                                  width=100, height=42, state="disabled",
                                  command=self.stop_recording)
         self.stop_btn.grid(row=0, column=4, sticky="s", padx=(T.SM, 0),
-                           pady=(0, 1))
+                           pady=(0, T.px(1)))
 
 
     # ------------------------------------------------------------------
@@ -423,6 +484,11 @@ class RecorderApp:
         self.transcript.append(f"\n[ERROR] {event.message}\n")
         self.status.set("processing failed", T.DANGER)
         self._reset_controls()
+        if self._unfinished:
+            # A failed run leaves its recorded tracks behind on purpose.
+            self.transcript.append(
+                "The recorded tracks were kept. Once the problem is fixed, "
+                "'Recover…' on the Recorder tab processes them again.\n")
         messagebox.showerror("Error", event.message)
 
     # ==================================================================
@@ -544,8 +610,20 @@ class RecorderApp:
 
     def _begin_recording(self):
         self._sync_settings_from_ui()
+        # The run gets its own copy: the sliders and 'Save settings' go on
+        # changing self.settings while it is under way, and the live chunks and
+        # the closing pass must be recognised with one and the same model and
+        # language.
+        self._run_settings = self.settings.snapshot()
+
+        go, heads_up = self._preflight(self._run_settings, recording=True)
+        if not go:
+            self._allow_new_work()
+            return
+
         base_name = self._resolve_output_conflict(
-            paths.safe_output_name(self.filename_entry.get()))
+            paths.safe_output_name(self.filename_entry.get()),
+            paths.output_extensions(self.settings.keep_raw_tracks))
         if base_name is None:                       # the user cancelled
             self._allow_new_work()
             return
@@ -576,6 +654,36 @@ class RecorderApp:
         self.transcript.append("Recording started.\n")
         for note in notes:
             self.transcript.append(note)
+        self._show_heads_up(heads_up)
+
+        # Only now that the recording really runs: fetch the model the closing
+        # pass needs, if it is not here yet, instead of after the meeting.
+        self._prefetch = pipeline.ModelPrefetch(self.bridge, self._run_settings)
+        self._prefetch.start()
+
+    def _preflight(self, run, recording):
+        """Look for trouble before anything is started.
+
+        Returns (go, notes). Errors are shown and mean no - the run would fail
+        after the recording, or never get going. Warnings are asked about.
+        Notes are only things worth knowing and come back to be written to the
+        log once it has been cleared for the run.
+        """
+        findings = preflight.check(run, recording=recording)
+        errors = [f.text for f in findings if f.level == preflight.ERROR]
+        if errors:
+            messagebox.showerror("Cannot start", "\n\n".join(errors))
+            return False, []
+        warnings = [f.text for f in findings if f.level == preflight.WARNING]
+        if warnings and not messagebox.askokcancel(
+                "Before you start", "\n\n".join(warnings) + "\n\nStart anyway?",
+                icon="warning"):
+            return False, []
+        return True, [f.text for f in findings if f.level == preflight.NOTE]
+
+    def _show_heads_up(self, notes):
+        for note in notes:
+            self.transcript.append(f"ℹ {note}\n")
 
     def _start_live(self, base_name):
         """Live transcription if the backend allows it, otherwise the preview.
@@ -589,14 +697,14 @@ class RecorderApp:
         """
         wants_live = bool(self.live_var.get())
         wants_preview = bool(self.preview_var.get())
+        run = self._run_settings
 
-        if wants_live and pipeline.live_transcription_possible(self.settings):
-            self.live = pipeline.LiveTranscriber(self.bridge, self.settings,
-                                                 self.engine,
+        if wants_live and pipeline.live_transcription_possible(run):
+            self.live = pipeline.LiveTranscriber(self.bridge, run, self.engine,
                                                  preview=wants_preview)
             self.live.start(base_name)
             return [f"Live transcription running with "
-                    f"{self.settings.model_name()} - stopping only has to "
+                    f"{run.model_name()} - stopping only has to "
                     f"catch up with the tail.\n"]
 
         notes = []
@@ -604,8 +712,7 @@ class RecorderApp:
             notes.append("⚠ Live transcription needs a local model; "
                          "ElevenLabs transcribes after you stop.\n")
         if wants_preview:
-            self.live_preview = pipeline.LivePreview(self.bridge, self.settings,
-                                                     self.engine)
+            self.live_preview = pipeline.LivePreview(self.bridge, run, self.engine)
             self.live_preview.start()
         return notes
 
@@ -638,17 +745,37 @@ class RecorderApp:
         if not recording.has_audio:
             if live is not None:
                 live.cancel()
+            recording.discard()          # empty files: nothing to recover later
             messagebox.showwarning("No data", "No audio data was captured.")
             self._reset_controls()
             return
 
-        self.finalizer = pipeline.Finalizer(self.bridge, self.settings, live=live)
-        self.finalizer.run_async(recording, self.recording_base_name)
+        # The levels are meant to be moved while listening to the meters, and
+        # the mixdown they shape is made now; everything else stays as it was
+        # when the recording began.
+        if self._run_settings is None:
+            self._run_settings = self.settings.snapshot()
+        self._run_settings.mic_gain_db = self.settings.mic_gain_db
+        self._run_settings.loop_gain_db = self.settings.loop_gain_db
+
+        self._start_finalizer(recording, self.recording_base_name, live=live)
+
+    def _start_finalizer(self, recording, base_name, live=None):
+        self.finalizer = pipeline.Finalizer(self.bridge, self._run_settings,
+                                            live=live)
+        self._work_thread = self.finalizer.run_async(recording, base_name)
 
     def upload_and_transcribe(self):
         # The button is disabled while a recording or any processing is under
         # way; the check keeps a direct call from slipping past it.
         if self.engine.is_recording or str(self.upload_btn["state"]) == "disabled":
+            return
+
+        # Before a file is picked: a missing key or an unwritable folder is no
+        # reason to make the user choose one first.
+        self._sync_settings_from_ui()
+        go, heads_up = self._preflight(self.settings.snapshot(), recording=False)
+        if not go:
             return
 
         file_types = [
@@ -666,7 +793,6 @@ class RecorderApp:
         if not file_path:
             return
 
-        self._sync_settings_from_ui()
         file_basename = os.path.basename(file_path)   # safe_output_name drops the extension
         base_name = self._resolve_output_conflict(
             paths.safe_output_name(self.filename_entry.get() or file_basename))
@@ -682,23 +808,28 @@ class RecorderApp:
         self.status.set("transcribing file…", T.WARN)
         self.transcript.clear()
         self.transcript.append(f"Processing uploaded file: {os.path.basename(file_path)}\n")
+        self._show_heads_up(heads_up)
 
-        self.finalizer = pipeline.FileFinalizer(self.bridge, self.settings)
-        self.finalizer.run_async(file_path, base_name)
+        self.finalizer = pipeline.FileFinalizer(self.bridge,
+                                                self.settings.snapshot())
+        self._work_thread = self.finalizer.run_async(file_path, base_name)
 
     # ------------------------------------------------------------------
-    def _resolve_output_conflict(self, base_name):
+    def _resolve_output_conflict(self, base_name, extensions=None):
         """Ask before an existing recording is silently replaced.
 
-        Both output files are written as '<base_name>.wav' / '.txt', so a
-        second run under the same name used to overwrite the first one without
-        a word. Returns the base name to write to - possibly numbered or
-        renamed - or None when the user cancelled.
+        The output files are written as '<base_name>.wav' / '.txt' (and, for a
+        recording with "Keep raw tracks", '.mic.wav' / '.sys.wav'), so a second
+        run under the same name used to overwrite the first one without a word.
+        Returns the base name to write to - possibly numbered or renamed - or
+        None when the user cancelled.
         """
         out_dir = self.settings.get_output_dir()
-        if not paths.existing_outputs(out_dir, base_name):
+        if not paths.existing_outputs(out_dir, base_name,
+                                      extensions or paths.OUTPUT_EXTENSIONS):
             return base_name
-        return dialogs.ask_output_conflict(self.root, out_dir, base_name)
+        return dialogs.ask_output_conflict(self.root, out_dir, base_name,
+                                           extensions)
 
     def _apply_base_name(self, base_name):
         """Show the name that is actually going to be written on disk."""
@@ -722,6 +853,99 @@ class RecorderApp:
         self.timer_label.config(text="00:00", fg=T.TEXT_MUTE)
         self.mic_meter.reset()
         self.sys_meter.reset()
+        # The run is over once Finished / Failed arrives, even if its thread is
+        # still tidying up for a moment - and only now can the check for
+        # leftover recordings tell a failed run from one in progress.
+        self._work_thread = None
+        self._processing_base = None
+        self._refresh_recovery_banner()
+
+    # ==================================================================
+    # Recordings that were interrupted
+    # ==================================================================
+    def _busy_with_work(self):
+        thread = self._work_thread
+        return self.engine.is_recording or (thread is not None and thread.is_alive())
+
+    def _in_use(self):
+        """Raw-track names of the recording being made or processed right now."""
+        if not self._busy_with_work():
+            return set()
+        return {name for name in (self.recording_base_name, self._processing_base)
+                if name}
+
+    def _refresh_recovery_banner(self):
+        """Show the banner while recordings are waiting that nothing works on."""
+        found = capture.find_unfinished(paths.TMP_DIR, exclude=self._in_use())
+        self._unfinished = found
+        if not found or self._busy_with_work():
+            self.recovery_banner.pack_forget()
+            return
+        first = found[0]
+        more = f" and {len(found) - 1} more" if len(found) > 1 else ""
+        self.recovery_label.config(
+            text=f"⚠ Unfinished recording: {_shorten(first.base_name)} "
+                 f"({format_clock(first.duration_s)}){more}")
+        self.recovery_banner.pack(fill=tk.X, pady=(0, T.SM),
+                                  before=self.sources_card)
+
+    def offer_recovery(self):
+        """Ask what to do with the newest interrupted recording.
+
+        Called shortly after start-up and by the banner's button. Does nothing
+        while a recording is being made or processed.
+        """
+        if self._shutting_down or self._busy_with_work():
+            return
+        self._refresh_recovery_banner()
+        if not self._unfinished:
+            return
+        newest = self._unfinished[0]
+        choice = dialogs.ask_recovery(self.root, newest,
+                                      more=len(self._unfinished) - 1)
+        if choice == "process":
+            self._process_unfinished(newest)
+        elif choice == "delete":
+            self._delete_unfinished(newest)
+
+    def _process_unfinished(self, unfinished):
+        self._sync_settings_from_ui()
+        run = self.settings.snapshot()
+        go, heads_up = self._preflight(run, recording=False)
+        if not go:                                  # the tracks stay where they are
+            return
+        base_name = self._resolve_output_conflict(
+            paths.safe_output_name(unfinished.base_name),
+            paths.output_extensions(self.settings.keep_raw_tracks))
+        if base_name is None:                       # the user cancelled
+            return
+
+        self.start_btn.config(state="disabled")
+        self.upload_btn.config(state="disabled")
+        self.stop_btn.config(state="disabled")
+        self.mic_combo.config(state="disabled")
+        self.sys_combo.config(state="disabled")
+        self.recovery_banner.pack_forget()
+        self.status.set("processing recovered recording…", T.WARN)
+        self.transcript.clear()
+        self.transcript.append(
+            f"Processing the recovered recording '{unfinished.base_name}'…\n")
+        self._show_heads_up(heads_up)
+
+        self.recording_base_name = base_name
+        self._processing_base = unfinished.base_name
+        self._run_settings = run
+        self._start_finalizer(capture.recording_from_unfinished(unfinished),
+                              base_name)
+
+    def _delete_unfinished(self, unfinished):
+        if not messagebox.askyesno(
+                "Delete recording",
+                f"Delete the recorded tracks of '{unfinished.base_name}'?\n\n"
+                f"This cannot be undone.", icon="warning"):
+            return
+        capture.remove_unfinished(unfinished)
+        self._refresh_recovery_banner()
 
 
     # ==================================================================
@@ -733,13 +957,14 @@ class RecorderApp:
         settings.loop_device = self.sys_combo.get()
         settings.mic_gain_db = round(float(self.mic_gain.get()), 1)
         settings.loop_gain_db = round(float(self.sys_gain.get()), 1)
-        settings.model_index = max(0, self.model_combo.current())
+        settings.model = config.model_key(self.model_combo.current())
         settings.language = config.LANGUAGE_CHOICES[max(0, self.lang_combo.current())][1]
         settings.api_key = self.api_entry.get().strip()
         settings.live_transcribe = bool(self.live_var.get())
         settings.live_preview = bool(self.preview_var.get())
         settings.separate_tracks = bool(self.separate_var.get())
         settings.use_vad = bool(self.vad_var.get())
+        settings.use_gpu = bool(self.gpu_var.get())
         settings.keep_raw_tracks = bool(self.keep_raw_var.get())
         settings.filename = paths.safe_output_name(self.filename_entry.get())
         raw_out = self.output_dir_entry.get().strip()
@@ -749,16 +974,22 @@ class RecorderApp:
     def save_settings(self):
         self._sync_settings_from_ui()
         try:
-            config.save(self.settings)
+            warnings = config.save(self.settings)
         except Exception as exc:
             messagebox.showerror("Error", f"Settings could not be saved:\n{exc}")
             return
         self.settings.migrated_plaintext_key = False
+        if warnings:
+            # Pressed 'Save' and something did not get saved: say so where the
+            # user is looking, not in a log on another tab.
+            self.status.set("settings saved, with a warning", T.WARN)
+            messagebox.showwarning("Settings saved", "\n\n".join(warnings))
+            return
         self.status.set("settings saved", T.OK)
 
     def _refresh_key_state(self):
         """The API key only matters for the cloud backend."""
-        uses_cloud = config.MODEL_CHOICES[max(0, self.model_combo.current())][1] is None
+        uses_cloud = config.model_key(self.model_combo.current()) == config.CLOUD_MODEL
         self.api_entry.config(state="normal" if uses_cloud else "disabled")
         self.show_key_btn.config(state="normal" if uses_cloud else "disabled")
 
@@ -827,6 +1058,8 @@ class RecorderApp:
         self.mic_meter.set_level(self.engine.mic_level * mic_gain)
         self.sys_meter.set_level(self.engine.sys_level * sys_gain)
         self.status.tick(METER_INTERVAL_MS / 1000.0)
+        for kind, message in self.engine.new_stream_errors():
+            self._report_stream_error(kind, message)
 
 
         if self.recording_started_at is not None:
@@ -839,10 +1072,37 @@ class RecorderApp:
 
         self._meter_after_id = self.root.after(METER_INTERVAL_MS, self._tick)
 
+    def _report_stream_error(self, kind, message):
+        """A source stopped delivering audio: say so now, not after Stop.
+
+        The recording carries on with the other track and the dead one just
+        ends, so until now nothing in the window told you - the meter going flat
+        was the only sign.
+        """
+        source = "Microphone" if kind == "mic" else "System audio"
+        self.transcript.append(f"⚠ {message}\n")
+        self.sources_card.set_hint(f"⚠ {source} stopped")
+        if self.engine.is_recording:
+            self.status.set(f"recording - {source.lower()} stopped", T.WARN,
+                            pulse=True)
+
     # ==================================================================
     # Shutdown
     # ==================================================================
+    def _confirm_quit(self):
+        """Closing the window mid-recording used to discard it without a word."""
+        if self.engine.is_recording:
+            what = "A recording is running. Quitting now stops it without a transcript."
+        else:
+            what = "A recording is still being processed. Quitting now cancels that."
+        return messagebox.askyesno(
+            "Quit now?",
+            f"{what}\n\nThe recorded tracks are kept, and the next start "
+            f"offers to process them. Quit anyway?", icon="warning")
+
     def on_close(self):
+        if self._busy_with_work() and not self._confirm_quit():
+            return
         self._shutting_down = True
         if self._meter_after_id is not None:
             try:
@@ -855,6 +1115,8 @@ class RecorderApp:
             self.live_preview.stop()
         if self.live is not None:
             self.live.cancel()
+        if self._prefetch is not None:
+            self._prefetch.cancel()
         if self.finalizer is not None:
             self.finalizer.cancel()
 
@@ -891,3 +1153,7 @@ def _index_of(choices, value):
         if code == value:
             return index
     return 0
+
+
+def _shorten(name, limit=40):
+    return name if len(name) <= limit else name[:limit - 1] + "…"

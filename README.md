@@ -168,7 +168,7 @@ Instead of downmixing audio upfront and estimating speakers probabilistically, b
 
 - **WASAPI / PulseAudio Loopback**: Native system audio capture guarantees zero-loss recording.
 - **Universal Audio Loader**: Reads native audio formats via `soundfile` with an automatic `FFmpeg` fallback for M4A, AAC, WMA, MP4, WebM, and Opus files.
-- **High-DPI & WQHD Display Scaling**: Native Windows High-DPI awareness (`SetProcessDpiAwareness(2)`) and dynamic scaling for WQHD (1440p) and 4K displays.
+- **High-DPI & WQHD Display Scaling**: Native Windows High-DPI awareness (`SetProcessDpiAwareness(2)`); fonts, spacing, buttons and the window size follow the display scaling, and the tabs scroll where the screen is too small to show them whole (e.g. 150 % on a 1080p laptop).
 - **Voice Activity Detection (VAD)**: Optional Silero VAD (`ggml-silero-vad.bin`) pre-filtering. When enabled, it strips silence before feeding audio to Whisper. It is disabled by default to preserve precise sentence timestamps essential for speaker diarization; `diarize.py` filters pause hallucinations using track-relative RMS energy instead.
 - **Polyphase Resampling**: High-quality 16 kHz Mono resampling via `scipy.signal.resample_poly`.
 - **Atomic File Operations**: Safe binary downloads and atomic settings updates prevent file corruption.

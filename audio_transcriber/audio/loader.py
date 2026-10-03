@@ -7,10 +7,9 @@ Falls back to system FFmpeg subprocess for M4A, AAC, WMA, MP4, WEBM, OPUS, etc.
 import os
 import subprocess
 import tempfile
-import soundfile as sf
 import numpy as np
 
-from . import dsp
+from . import dsp, stream
 from ..transcribe.base import TranscriptionError
 
 
@@ -26,9 +25,11 @@ def load_audio_file(file_path: str, target_rate: int = dsp.TARGET_RATE) -> np.nd
     if os.path.getsize(file_path) == 0:
         raise TranscriptionError(f"Audio file is empty: {file_path}")
 
-    # 1. Try reading directly with soundfile (fast, native)
+    # 1. Try reading directly with soundfile (fast, native). Chunk by chunk:
+    # the whole file at its native rate, its channel average and the resampled
+    # copy used to be in memory at once - about 1.8 GB per hour of stereo.
     try:
-        data, rate = sf.read(file_path, dtype="float32", always_2d=False)
+        resampled = stream.read_mono_resampled(file_path, target_rate)
     except Exception:
         # soundfile failed or format unsupported (e.g. m4a, aac, wma) -> try FFmpeg fallback
         pass
@@ -36,9 +37,6 @@ def load_audio_file(file_path: str, target_rate: int = dsp.TARGET_RATE) -> np.nd
         # A readable-but-empty file is a decoding result, not a decoding
         # failure. Raising inside the try above sent it down the FFmpeg path
         # and reported a misleading "FFmpeg not found" instead.
-        if data.ndim > 1:
-            data = data.mean(axis=1)
-        resampled = dsp.resample(data, rate, target_rate)
         if len(resampled) == 0:
             raise TranscriptionError(f"Audio file contains no sample data: {file_path}")
         return resampled
@@ -71,10 +69,7 @@ def _load_via_ffmpeg(file_path: str, target_rate: int) -> np.ndarray:
             raise TranscriptionError(
                 f"Could not read audio file '{os.path.basename(file_path)}': {err_msg}")
 
-        data, rate = sf.read(temp_wav, dtype="float32", always_2d=False)
-        if data.ndim > 1:
-            data = data.mean(axis=1)
-        resampled = dsp.resample(data, rate, target_rate)
+        resampled = stream.read_mono_resampled(temp_wav, target_rate)
         if len(resampled) == 0:
             raise TranscriptionError(f"Audio file contains no audio data: {file_path}")
         return resampled

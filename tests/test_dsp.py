@@ -126,6 +126,79 @@ class TestLevels(unittest.TestCase):
         self.assertEqual(dsp.segment_rms(None, 0.0, 1.0), 0.0)
 
 
+def burst_slices(count, speech_share, rate=16000):
+    """Where sparse_track() puts its 8 s speech bursts."""
+    burst = 8 * rate
+    bursts = max(1, int(speech_share * count) // burst)
+    starts = [int((k + 0.5) * count / bursts) - burst // 2 for k in range(bursts)]
+    return [slice(start, start + burst) for start in starts]
+
+
+def sparse_track(speech_share, noise_db=-58.0, speech_db=-22.0, minutes=10,
+                 rate=16000, seed=3):
+    """Constant room noise plus 8 s speech bursts adding up to `speech_share`."""
+    rng = np.random.default_rng(seed)
+    count = minutes * 60 * rate
+    signal = rng.normal(0, 10 ** (noise_db / 20), count).astype(np.float32)
+    for window in burst_slices(count, speech_share, rate):
+        signal[window] += rng.normal(0, 10 ** (speech_db / 20),
+                                     window.stop - window.start).astype(np.float32)
+    return signal
+
+
+class TestReferenceOfSparseTracks(unittest.TestCase):
+    """A track on which little is said - you listen to a webinar, the other side
+    does the talking.
+
+    The 95th percentile of all frames then lands in the room noise, which
+    became the 'typical speech level': the noise was lifted by the full +32 dB
+    and could no longer be told apart from speech.
+    """
+
+    def test_the_reference_is_the_speech_level_however_little_is_said(self):
+        for share in (0.40, 0.20, 0.10, 0.05, 0.03, 0.01):
+            with self.subTest(speech_share=share):
+                reference_db = 20 * np.log10(dsp.reference_level(sparse_track(share)))
+                self.assertAlmostEqual(reference_db, -22.0, delta=3.0)
+
+    def test_speech_ends_up_at_the_target_level_however_little_is_said(self):
+        """normalize_for_asr() aims at 0.06 RMS for SPEECH. Measured against the
+        noise instead, the gain came out far too high - the closing peak limiter
+        then scaled the whole track back down and left the speech at four times
+        the target."""
+        for share in (0.30, 0.03):
+            with self.subTest(speech_share=share):
+                signal = sparse_track(share)
+                lifted = dsp.normalize_for_asr(signal)
+                window = burst_slices(len(signal), share)[0]
+                off_target_db = 20 * np.log10(dsp.rms(lifted[window]) / 0.06)
+                self.assertAlmostEqual(off_target_db, 0.0, delta=3.0)
+                self.assertLess(dsp.rms(lifted[:16000 * 3]), 0.002,
+                                "room noise must stay far below the speech")
+
+    def test_dense_speech_keeps_exactly_the_old_reference(self):
+        """Nothing changes where the percentile worked: the median of the clear
+        speech is below it as soon as there is enough speech."""
+        for share in (0.40, 0.60, 0.90):
+            with self.subTest(speech_share=share):
+                signal = sparse_track(share, minutes=4)
+                levels = dsp.frame_rms(signal, 1600)
+                self.assertEqual(dsp.reference_level(signal),
+                                 float(np.percentile(levels[levels > dsp.SILENCE_FLOOR], 95.0)))
+
+    def test_pure_noise_is_left_alone(self):
+        noise = np.random.default_rng(4).normal(0, 0.01, 16000 * 30).astype(np.float32)
+        self.assertGreater(dsp.reference_level(noise), 0.0095)
+        self.assertLess(dsp.reference_level(noise), 0.0108)
+
+    def test_a_single_click_does_not_make_a_track_speech(self):
+        """Fewer than a second of loud frames is a cough or a mouse click."""
+        rng = np.random.default_rng(5)
+        signal = rng.normal(0, 0.001, 16000 * 60).astype(np.float32)
+        signal[16000 * 10:16000 * 10 + 4800] += 0.5          # three frames
+        self.assertLess(dsp.reference_level(signal), 0.01)
+
+
 class TestGain(unittest.TestCase):
     def test_limit_peak_never_amplifies(self):
         quiet = np.full(100, 0.1, dtype=np.float32)
