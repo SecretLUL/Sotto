@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from audio_transcriber import config, secretstore
 
@@ -120,6 +121,43 @@ class TestSettingsFile(unittest.TestCase):
     def test_save_is_atomic(self):
         config.save(config.Settings(), self.path)
         self.assertFalse(os.path.exists(self.path + ".tmp"))
+
+    def test_the_default_path_is_looked_up_when_called(self):
+        """Regression: load() and save() bound CFG_PATH when the module was
+        imported, so pointing config.CFG_PATH at a temporary file - as the GUI
+        tests do to 'never touch the user's real settings' - changed nothing."""
+        with patch.object(config, "CFG_PATH", self.path):
+            config.save(config.Settings(filename="patched"))
+            self.assertTrue(os.path.exists(self.path))
+            loaded, _warnings = config.load()
+        self.assertEqual(loaded.filename, "patched")
+
+    def test_unexpected_json_still_falls_back_to_the_environment_key(self):
+        """The other early returns did; this one forgot."""
+        with open(self.path, "w", encoding="utf-8") as handle:
+            handle.write("[1, 2, 3]")
+        with patch.dict(os.environ, {"ELEVENLABS_API_KEY": "env-key-123"}):
+            loaded, warnings = config.load(self.path)
+        self.assertTrue(warnings)
+        self.assertEqual(loaded.api_key, "env-key-123")
+
+    def test_a_key_from_the_environment_is_not_copied_into_the_file(self):
+        """A stored copy beats the variable on the next start, so saving it
+        would make a rotated ELEVENLABS_API_KEY silently change nothing."""
+        with patch.dict(os.environ, {"ELEVENLABS_API_KEY": "env-key-123"}):
+            settings, _warnings = config.load(self.path)       # no file yet
+            self.assertEqual(settings.api_key, "env-key-123")
+            config.save(settings, self.path)
+            with open(self.path, encoding="utf-8") as handle:
+                self.assertEqual(json.load(handle)["elevenlabs_api_key_enc"], "")
+
+            # A key the user typed in is still stored.
+            settings.api_key = SAMPLE_KEY
+            config.save(settings, self.path)
+            with open(self.path, encoding="utf-8") as handle:
+                stored = json.load(handle)["elevenlabs_api_key_enc"]
+        if secretstore.is_available():
+            self.assertTrue(stored)
 
 
 class TestModelSelection(unittest.TestCase):

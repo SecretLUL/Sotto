@@ -30,19 +30,27 @@ def _can_open_window():
 @unittest.skipUnless(_can_open_window(), "no graphical display available")
 class TestAppLifecycle(unittest.TestCase):
     def setUp(self):
+        from unittest.mock import patch
         from audio_transcriber import config, paths
+        from audio_transcriber.audio.capture import AudioEngine
         from audio_transcriber.ui import icons
         icons._ICON_CACHE.clear()
         self.tmpdir = tempfile.mkdtemp()
         self._orig_cfg = config.CFG_PATH
-        # Never touch the user's real settings
+        # Never touch the user's real settings (effective since load() and
+        # save() look the path up when called)
         config.CFG_PATH = os.path.join(self.tmpdir, "settings.json")
+        # ... and never open the real microphone: building the window starts
+        # the level monitoring. The hardware test covers real streams.
+        self._no_audio = patch.object(AudioEngine, "configure", return_value=[])
+        self._no_audio.start()
         self.paths = paths
 
     def tearDown(self):
         import shutil
         from audio_transcriber import config
         from audio_transcriber.ui import icons
+        self._no_audio.stop()
         icons._ICON_CACHE.clear()
         config.CFG_PATH = self._orig_cfg
         shutil.rmtree(self.tmpdir, ignore_errors=True)

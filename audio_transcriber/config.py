@@ -114,13 +114,19 @@ class Settings:
 
 
 # ----------------------------------------------------------------------
-def load(path=CFG_PATH):
+def load(path=None):
     """Load the settings. Returns (Settings, warnings).
 
     Invalid individual values are dropped instead of invalidating the whole
     file; the previous version silently reset everything to defaults on any
     error.
+
+    `path` defaults to CFG_PATH as it is when called. It used to be bound as a
+    default argument at import time, so a test that pointed config.CFG_PATH at
+    a temporary file ("never touch the user's real settings") changed nothing:
+    the real settings.json was still read - and, on save, overwritten.
     """
+    path = CFG_PATH if path is None else path
     warnings = []
     settings = Settings()
 
@@ -139,6 +145,7 @@ def load(path=CFG_PATH):
 
     if not isinstance(raw, dict):
         warnings.append("settings.json has an unexpected format.")
+        settings.api_key = secretstore.from_environment()
         return settings, warnings
 
     known = {f.name: f.type for f in fields(Settings)}
@@ -183,14 +190,20 @@ def load(path=CFG_PATH):
     return settings, warnings
 
 
-def save(settings, path=CFG_PATH):
-    """Save atomically. The key is never written in clear text."""
+def save(settings, path=None):
+    """Save atomically. The key is never written in clear text.
+
+    A key that merely came from ELEVENLABS_API_KEY is not written at all: the
+    stored copy would win over the variable from then on, so rotating the
+    variable would silently change nothing.
+    """
+    path = CFG_PATH if path is None else path
     data = asdict(settings)
     data.pop("api_key", None)
     data.pop("migrated_plaintext_key", None)
     data["schema_version"] = SCHEMA_VERSION
 
-    if settings.api_key:
+    if settings.api_key and settings.api_key != secretstore.from_environment():
         try:
             data["elevenlabs_api_key_enc"] = secretstore.encrypt(settings.api_key)
         except OSError:
