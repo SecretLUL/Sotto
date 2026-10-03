@@ -109,6 +109,14 @@ class _Track:
         self.surplus = 0
         self.first_block_at = None
         self.error = None
+        self.error_at = None             # perf_counter() of the first error
+        self.error_reported = False      # handed out by new_stream_errors()
+
+    def fail(self, message):
+        """Remember why this track stopped - the first reason is the real one."""
+        if self.error is None:
+            self.error = message
+            self.error_at = time.perf_counter()
 
 
 class AudioEngine:
@@ -190,6 +198,22 @@ class AudioEngine:
     def stream_errors(self):
         return [track.error for track in self._tracks.values() if track.error]
 
+    def new_stream_errors(self):
+        """(kind, message) for every stream error not handed out yet - once each.
+
+        A source that stops delivering audio (USB microphone pulled, device
+        switched away) ends its capture thread and nothing else: the recording
+        goes on with the other track and the one that died simply stops. The
+        window polls this so it can say so while it is still happening, not
+        only in the notes after Stop.
+        """
+        fresh = []
+        for track in list(self._tracks.values()):
+            if track.error and not track.error_reported:
+                track.error_reported = True
+                fresh.append((track.kind, track.error))
+        return fresh
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -221,9 +245,11 @@ class AudioEngine:
                         track.stream = self._open_stream(track)
                         opened.append(track)
                     except Exception as exc:
-                        track.error = (
+                        track.fail(
                             f"{'Microphone' if kind == 'mic' else 'System audio'} "
                             f"'{device.name}' could not be opened: {exc}")
+                        # Returned to the caller below: do not report it twice.
+                        track.error_reported = True
                         warnings.append(track.error)
                     tracks[kind] = track
 
@@ -337,6 +363,20 @@ class AudioEngine:
                 device_name=track.device.name,
             ))
 
+        for track in self._tracks.values():
+            # A source that died mid-recording: its file just ends there and
+            # the finalizer pads the rest with silence - say so.
+            if track.error and track.path:
+                if track.first_block_at is None:
+                    when = "never delivered any audio"
+                else:
+                    when = (f"stopped delivering audio "
+                            f"{_mmss(track.error_at - track.first_block_at)} "
+                            f"into the recording")
+                result.warnings.append(
+                    f"'{track.device.name}' {when} ({track.error}). "
+                    f"The rest of that track is silent.")
+
         for track_result in (result.mic, result.sys):
             if track_result is None:
                 continue
@@ -396,7 +436,7 @@ class AudioEngine:
                 try:
                     data = track.stream.read(BLOCK_FRAMES, exception_on_overflow=False)
                 except Exception as exc:
-                    track.error = f"Read error on '{track.device.name}': {exc}"
+                    track.fail(f"Read error on '{track.device.name}': {exc}")
                     break
                 if not data:
                     continue
@@ -437,9 +477,15 @@ class AudioEngine:
                     track.frames += len(mono)
                     self._emit(track, mono)
         except Exception as exc:                # pragma: no cover
-            track.error = f"Capture thread '{track.device.name}': {exc}"
+            track.fail(f"Capture thread '{track.device.name}': {exc}")
         finally:
             track.level = 0.0
+
+
+def _mmss(seconds):
+    """'12:30' - minutes keep counting past an hour."""
+    total = max(0, int(seconds))
+    return f"{total // 60:02d}:{total % 60:02d}"
 
 
 # ----------------------------------------------------------------------

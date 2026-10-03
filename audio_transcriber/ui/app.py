@@ -827,6 +827,8 @@ class RecorderApp:
         self.mic_meter.set_level(self.engine.mic_level * mic_gain)
         self.sys_meter.set_level(self.engine.sys_level * sys_gain)
         self.status.tick(METER_INTERVAL_MS / 1000.0)
+        for kind, message in self.engine.new_stream_errors():
+            self._report_stream_error(kind, message)
 
 
         if self.recording_started_at is not None:
@@ -838,6 +840,20 @@ class RecorderApp:
                 else f"{minutes:02d}:{seconds:02d}")
 
         self._meter_after_id = self.root.after(METER_INTERVAL_MS, self._tick)
+
+    def _report_stream_error(self, kind, message):
+        """A source stopped delivering audio: say so now, not after Stop.
+
+        The recording carries on with the other track and the dead one just
+        ends, so until now nothing in the window told you - the meter going flat
+        was the only sign.
+        """
+        source = "Microphone" if kind == "mic" else "System audio"
+        self.transcript.append(f"⚠ {message}\n")
+        self.sources_card.set_hint(f"⚠ {source} stopped")
+        if self.engine.is_recording:
+            self.status.set(f"recording - {source.lower()} stopped", T.WARN,
+                            pulse=True)
 
     # ==================================================================
     # Shutdown

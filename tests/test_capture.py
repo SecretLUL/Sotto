@@ -13,7 +13,7 @@ from unittest.mock import patch
 import numpy as np
 import soundfile as sf
 
-from audio_transcriber.audio import capture, dsp
+from audio_transcriber.audio import capture, devices, dsp
 
 RATE = 48000
 BLOCK = capture.BLOCK_FRAMES
@@ -303,6 +303,120 @@ class TestCaptureTap(unittest.TestCase):
         self.assertIsNone(track.error)
         self.assertEqual(track.frames, 3 * BLOCK)
         self.assertIsNone(self.engine._tap)             # detached, not retried
+
+
+# ----------------------------------------------------------------------
+class FakeStream:
+    """A device that delivers `blocks` blocks at real-time pace, then dies."""
+
+    def __init__(self, blocks, rate=16000):
+        self.blocks = blocks
+        self.rate = rate
+
+    def start_stream(self):
+        pass
+
+    def stop_stream(self):
+        pass
+
+    def close(self):
+        pass
+
+    def read(self, frames, exception_on_overflow=False):
+        if self.blocks <= 0:
+            raise OSError("device unplugged")
+        self.blocks -= 1
+        time.sleep(frames / float(self.rate))
+        return np.full(frames, 0.1, dtype=np.float32).tobytes()
+
+
+class FakePortAudio:
+    def __init__(self, blocks=5, open_error=None):
+        self.blocks = blocks
+        self.open_error = open_error
+
+    def open(self, **_kwargs):
+        if self.open_error is not None:
+            raise self.open_error
+        return FakeStream(self.blocks)
+
+
+def usb_microphone():
+    return devices.Device(index=3, name="USB Microphone", host_api="WASAPI",
+                          max_input_channels=1, max_output_channels=0,
+                          default_rate=16000, is_loopback=False)
+
+
+class TestSourceFailure(unittest.TestCase):
+    """A source that stops delivering audio used to vanish without a word.
+
+    Its capture thread ended, the recording went on with the other track and the
+    dead one simply stopped; track.error was only ever read when Start failed.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.engine = None
+
+    def tearDown(self):
+        if self.engine is not None:
+            self.engine.stop_streams()
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _engine(self, **options):
+        self.engine = capture.AudioEngine(FakePortAudio(**options), self.dir)
+        return self.engine
+
+    @staticmethod
+    def _wait_for_error(engine, timeout=5.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if engine.stream_errors():
+                return True
+            time.sleep(0.02)
+        return False
+
+    def test_a_source_dying_mid_recording_is_noted_in_the_result(self):
+        engine = self._engine(blocks=5)
+        self.assertEqual(engine.configure(usb_microphone(), None), [])
+        engine.start_recording("take")
+        self.assertTrue(self._wait_for_error(engine))
+        result = engine.stop_recording()
+
+        self.assertTrue(result.has_audio, "what it delivered is kept")
+        notes = " ".join(result.warnings)
+        self.assertIn("USB Microphone", notes)
+        self.assertIn("stopped delivering audio", notes)
+        self.assertIn("device unplugged", notes)
+        self.assertIn("silent", notes)
+
+    def test_the_window_hears_about_it_once(self):
+        engine = self._engine(blocks=3)
+        engine.configure(usb_microphone(), None)
+        self.assertTrue(self._wait_for_error(engine))
+
+        first = engine.new_stream_errors()
+        self.assertEqual([kind for kind, _message in first], ["mic"])
+        self.assertIn("device unplugged", first[0][1])
+        self.assertEqual(engine.new_stream_errors(), [])
+
+    def test_a_stream_that_cannot_be_opened_is_not_reported_twice(self):
+        engine = self._engine(open_error=OSError("device busy"))
+        warnings = engine.configure(usb_microphone(), None)
+
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("could not be opened", warnings[0])
+        self.assertEqual(engine.new_stream_errors(), [],
+                         "configure() already returned it as a warning")
+
+    def test_a_healthy_recording_gets_no_failure_note(self):
+        engine = self._engine(blocks=10_000)
+        engine.configure(usb_microphone(), None)
+        engine.start_recording("take")
+        time.sleep(0.4)
+        result = engine.stop_recording()
+        self.assertFalse([w for w in result.warnings if "stopped delivering" in w])
+        self.assertEqual(engine.new_stream_errors(), [])
 
 
 if __name__ == "__main__":

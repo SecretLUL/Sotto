@@ -368,6 +368,22 @@ class TestControlStates(unittest.TestCase):
         self.assertEqual(self._state(self.app.start_btn), "normal")
         self.assertEqual(self._state(self.app.upload_btn), "normal")
 
+    def test_a_source_that_dies_is_reported_while_recording(self):
+        """The recording carries on with the other track; without this the flat
+        meter was the only sign that the microphone was gone."""
+        pending = [[("mic", "Read error on 'USB Mic': device unplugged")]]
+        self.app.engine.new_stream_errors = lambda: pending.pop(0) if pending else []
+        self.app.engine._recording = True            # as if Start had worked
+        try:
+            self.app._tick()
+            self.app._tick()                         # nothing new the second time
+        finally:
+            self.app.engine._recording = False
+
+        text = self.app.transcript.text.get("1.0", "end-1c")
+        self.assertEqual(text.count("device unplugged"), 1)
+        self.assertEqual(self.app.status._text, "recording - microphone stopped")
+
     def test_a_direct_upload_call_cannot_slip_past_the_disabled_button(self):
         from unittest.mock import patch
         self.app.upload_btn.config(state="disabled")
