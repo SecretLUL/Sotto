@@ -597,6 +597,126 @@ class TestScroller(unittest.TestCase):
         self.assertEqual(combo.current(), 1)
 
 
+@unittest.skipUnless(HAVE_DISPLAY, "no graphical display available")
+class TestTabs(unittest.TestCase):
+    """The tab bar that replaced ttk.Notebook, whose selected tab was smaller
+    than the others and whose pages had a light frame."""
+
+    def setUp(self):
+        from audio_transcriber.ui import icons, theme
+        icons._ICON_CACHE.clear()
+        self.root = tk.Tk()
+        self.root.withdraw()
+        theme.apply(self.root)
+        self.addCleanup(self.root.destroy)
+        self.addCleanup(icons._ICON_CACHE.clear)
+
+    def _tabs(self):
+        from audio_transcriber.ui import widgets as W
+        tabs = W.Tabs(self.root)
+        tabs.pack(fill=tk.BOTH, expand=True)
+        pages = [tk.Frame(tabs, width=200, height=100) for _ in range(3)]
+        for page, caption in zip(pages, ("One", "A longer one", "Three")):
+            tabs.add(page, caption, "settings")
+        self.root.geometry("640x300+0+0")
+        try:
+            self.root.attributes("-alpha", 0.0)
+        except tk.TclError:                          # pragma: no cover
+            pass
+        self.root.deiconify()
+        pump(self.root)
+        return tabs, pages
+
+    def test_the_first_page_is_shown_and_only_it(self):
+        tabs, pages = self._tabs()
+        self.assertIs(tabs.select(), pages[0])
+        self.assertEqual([page.winfo_ismapped() for page in pages],
+                         [True, False, False])
+
+    def test_selecting_shows_that_page_instead(self):
+        tabs, pages = self._tabs()
+        tabs.select(pages[2])
+        pump(self.root)
+        self.assertEqual([page.winfo_ismapped() for page in pages],
+                         [False, False, True])
+
+    def test_a_click_on_a_tab_selects_its_page(self):
+        tabs, pages = self._tabs()
+        width = tabs._tab_width()
+        tabs.bar.event_generate("<Button-1>", x=int(tabs.INSET + 1.5 * width), y=10)
+        pump(self.root)
+        self.assertIs(tabs.select(), pages[1])
+
+    def test_the_tabs_keep_their_size_when_selected(self):
+        tabs, pages = self._tabs()
+        before = (tabs.bar.winfo_height(), tabs._tab_width(), tabs._bar_width())
+        for page in pages:
+            tabs.select(page)
+            pump(self.root)
+            self.assertEqual(
+                (tabs.bar.winfo_height(), tabs._tab_width(), tabs._bar_width()),
+                before)
+
+    def test_every_caption_fits_its_tab(self):
+        from audio_transcriber.ui import theme as T
+        tabs, _pages = self._tabs()
+        needed = max(T.fonts["button"].measure(text) for _p, text, _i in tabs._tabs)
+        self.assertGreaterEqual(tabs._tab_width(), needed + T.px(tabs.ICON))
+
+
+@unittest.skipUnless(HAVE_DISPLAY, "no graphical display available")
+class TestTabOrder(unittest.TestCase):
+    # A class of its own: ShownApp makes its own Tk, and icons' cache serves
+    # whichever Tk exists first.
+    def test_the_window_shows_recorder_transcript_settings_in_that_order(self):
+        with ShownApp() as shown:
+            app = shown.app
+            self.assertEqual(app.notebook.pages(),
+                             [app.tab_recorder, app.tab_transcript, app.tab_settings])
+            self.assertIs(app.notebook.select(), app.tab_recorder)
+
+
+@unittest.skipUnless(HAVE_DISPLAY, "no graphical display available")
+class TestTranscriptPane(unittest.TestCase):
+    """An empty pane says what will appear in it, and its scrollbar shows only
+    while there is something to scroll."""
+
+    def setUp(self):
+        from audio_transcriber.ui import theme
+        from audio_transcriber.ui import widgets as W
+        self.root = tk.Tk()
+        self.root.withdraw()
+        theme.apply(self.root)
+        self.addCleanup(self.root.destroy)
+        self.pane = W.Transcript(self.root, height=4)
+        self.pane.pack(fill=tk.BOTH, expand=True)
+        self.root.geometry("400x200+0+0")
+        try:
+            self.root.attributes("-alpha", 0.0)
+        except tk.TclError:                          # pragma: no cover
+            pass
+        self.root.deiconify()
+        pump(self.root)
+
+    def test_the_placeholder_shows_only_while_the_pane_is_empty(self):
+        pane = self.pane
+        self.assertEqual(pane.placeholder.winfo_manager(), "place")
+        pane.append("Recording started.\n")
+        self.assertEqual(pane.placeholder.winfo_manager(), "")
+        pane.clear()
+        self.assertEqual(pane.placeholder.winfo_manager(), "place")
+
+    def test_the_scrollbar_shows_only_while_there_is_more_than_fits(self):
+        pane = self.pane
+        self.assertEqual(pane.scroll.winfo_manager(), "")
+        pane.append("".join(f"[00:{i:02d}] [You]: line {i}\n" for i in range(60)))
+        pump(self.root)
+        self.assertEqual(pane.scroll.winfo_manager(), "pack")
+        pane.clear()
+        pump(self.root)
+        self.assertEqual(pane.scroll.winfo_manager(), "")
+
+
 class TestThemeScale(unittest.TestCase):
     def tearDown(self):
         from audio_transcriber.ui import theme

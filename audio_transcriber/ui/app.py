@@ -29,7 +29,7 @@ from ..audio.capture import AudioEngine
 from ..events import (Failed, Finished, LivePreview, Log, Progress, Status,
                       UiBridge)
 from ..transcribe.base import format_clock
-from . import dialogs, icons
+from . import chrome, dialogs, icons
 from . import theme as T
 from . import widgets as W
 
@@ -39,7 +39,7 @@ METER_INTERVAL_MS = 40
 # may be shrunk to. Both are scaled with the display and kept within the screen
 # (_size_window); they used to be fixed pixel counts - 900 high at the least,
 # which does not fit a 1366x768 laptop at all.
-WINDOW_SIZE = (920, 980)
+WINDOW_SIZE = (940, 840)
 WINDOW_MIN_SIZE = (700, 600)
 # What the screen keeps for itself: window frame, title bar, taskbar.
 SCREEN_MARGIN = (24, 96)
@@ -65,6 +65,7 @@ class RecorderApp:
         self.root.title("Sotto")
 
         T.apply(root)                    # first: it sets the display scaling
+        chrome.set_icon(root)
         self._size_window()
 
         self.settings, warnings = config.load()
@@ -104,6 +105,10 @@ class RecorderApp:
         self._tick()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.bind("<F5>", lambda _e: self._toggle_recording())
+        # Ctrl+1, 2, 3: the tabs, in the order they are shown.
+        for number, page in enumerate(self.notebook.pages(), start=1):
+            self.root.bind(f"<Control-Key-{number}>",
+                           lambda _e, page=page: self.notebook.select(page))
 
     # ==================================================================
     # Construction
@@ -125,48 +130,47 @@ class RecorderApp:
 
         self._build_header(outer)
 
-        self.notebook = ttk.Notebook(outer)
+        # The order of work: record, read, and now and then adjust.
+        self.notebook = W.Tabs(outer)
         self.notebook.pack(fill=tk.BOTH, expand=True)
 
         self.tab_recorder = tk.Frame(self.notebook, bg=T.BG)
-        self.tab_settings = tk.Frame(self.notebook, bg=T.BG)
         self.tab_transcript = tk.Frame(self.notebook, bg=T.BG)
+        self.tab_settings = tk.Frame(self.notebook, bg=T.BG)
 
-        self.notebook.add(self.tab_recorder, text="  🎙️ Recorder  ")
-        self.notebook.add(self.tab_settings, text="  ⚙️ Settings  ")
-        self.notebook.add(self.tab_transcript, text="  📄 Transcript  ")
+        self.notebook.add(self.tab_recorder, "Recorder", "microphone")
+        self.notebook.add(self.tab_transcript, "Transcript", "transcript")
+        self.notebook.add(self.tab_settings, "Settings", "settings")
 
-        # Tab 1: Recorder. The first two tabs scroll where the screen cannot
-        # give the window their full height (W.Scroller).
+        # Recorder and Settings scroll where the screen cannot give the window
+        # their full height (W.Scroller).
         recorder_page = W.Scroller(self.tab_recorder)
-        recorder_page.pack(fill=tk.BOTH, expand=True, pady=(T.SM, 0))
+        recorder_page.pack(fill=tk.BOTH, expand=True)
         recorder_container = recorder_page.body
         self._build_recovery_banner(recorder_container)
         self._build_sources(recorder_container)
         self._build_record_bar(recorder_container)
 
-        # Tab 2: Settings
+        self._build_transcript(self.tab_transcript)
+
         settings_page = W.Scroller(self.tab_settings)
-        settings_page.pack(fill=tk.BOTH, expand=True, pady=(T.SM, 0))
+        settings_page.pack(fill=tk.BOTH, expand=True)
         settings_container = settings_page.body
         self._build_ai(settings_container)
         self._build_output_folder(settings_container)
         self._build_options_card(settings_container)
-
-        # Tab 3: Transcript
-        transcript_container = tk.Frame(self.tab_transcript, bg=T.BG)
-        transcript_container.pack(fill=tk.BOTH, expand=True, pady=(T.SM, 0))
-        self._build_transcript(transcript_container)
+        self._build_settings_footer(settings_container)
+        self._refresh_subtitle()
 
     # ------------------------------------------------------------------
     def _build_header(self, parent):
         head = tk.Frame(parent, bg=T.BG)
-        head.pack(fill=tk.X, pady=(0, T.MD))
+        head.pack(fill=tk.X, pady=(0, T.LG))
 
         left = tk.Frame(head, bg=T.BG)
         left.pack(side=tk.LEFT)
 
-        self._icon_refs["logo"] = icons.get_icon("app_logo", size=T.px(42))
+        self._icon_refs["logo"] = icons.get_icon("app_logo", size=T.px(44))
         tk.Label(left, image=self._icon_refs["logo"], bg=T.BG).pack(
             side=tk.LEFT, padx=(0, T.MD))
 
@@ -174,10 +178,11 @@ class RecorderApp:
         text_frame.pack(side=tk.LEFT)
         tk.Label(text_frame, text="Sotto", bg=T.BG, fg=T.TEXT,
                  font=T.fonts["display"], anchor="w").pack(anchor="w")
-        self.subtitle = tk.Label(
-            text_frame, bg=T.BG, fg=T.TEXT_MUTE, font=T.fonts["small"], anchor="w",
-            text=f"whisper.cpp · {self.settings.threads()} threads · "
-                 f"ElevenLabs Scribe")
+        # What the next run is going to use, as set on the Settings tab
+        # (_refresh_subtitle). It used to list every engine there is, whichever
+        # was set.
+        self.subtitle = tk.Label(text_frame, bg=T.BG, fg=T.TEXT_MUTE,
+                                 font=T.fonts["small"], anchor="w")
         self.subtitle.pack(anchor="w", pady=(T.px(2), 0))
 
         self.status = W.StatusPill(head, bg=T.BG, width=260, height=36)
@@ -204,50 +209,54 @@ class RecorderApp:
     # ------------------------------------------------------------------
     def _build_sources(self, parent):
         card = W.Card(parent, title="Sources", icon_name="sources")
-        card.pack(fill=tk.X, pady=(0, T.SM))
+        card.pack(fill=tk.X, pady=(0, T.MD))
 
         self.sources_card = card
         body = card.body
+        body.columnconfigure(0, weight=1)
 
+        # Each source in the colour of the voice it carries - the colours of
+        # the logo and of the speakers in the transcript.
         self.mic_combo, self.mic_meter, self.mic_gain, self.mic_gain_label = \
-            self._source_row(body, "microphone", "Microphone — your voice",
-                             self._on_mic_gain, row=0)
+            self._source_row(body, 0, "microphone", T.YOU, "Microphone",
+                             "your voice", self._on_mic_gain)
         tk.Frame(body, bg=T.BORDER, height=1).grid(
-            row=1, column=0, columnspan=3, sticky="ew", pady=T.SM)
+            row=1, column=0, sticky="ew", pady=T.MD)
         self.sys_combo, self.sys_meter, self.sys_gain, self.sys_gain_label = \
-            self._source_row(body, "speaker", "Playback — the other voices",
-                             self._on_sys_gain, row=2)
+            self._source_row(body, 2, "speaker", T.OTHERS, "System audio",
+                             "everyone else on the call", self._on_sys_gain)
 
-        body.columnconfigure(1, weight=1)
+    def _source_row(self, body, row, icon_name, colour, title, whose, gain_command):
+        """One source: what it is, its device, its level and its gain."""
+        frame = tk.Frame(body, bg=T.CARD)
+        frame.grid(row=row, column=0, sticky="ew")
+        frame.columnconfigure(1, weight=1)
 
-    def _source_row(self, body, icon_name, label, gain_command, row):
-        head = tk.Frame(body, bg=T.CARD)
-        head.grid(row=row, column=0, columnspan=3, sticky="ew")
-        head.columnconfigure(1, weight=1)
+        W.IconBadge(frame, icon_name, colour).grid(
+            row=0, column=0, rowspan=2, sticky="nw", padx=(0, T.MD), pady=(T.px(2), 0))
+        heading = tk.Frame(frame, bg=T.CARD)
+        heading.grid(row=0, column=1, sticky="w")
+        tk.Label(heading, text=title, bg=T.CARD, fg=T.TEXT,
+                 font=T.fonts["body_bold"]).pack(side=tk.LEFT)
+        tk.Label(heading, text=f"·  {whose}", bg=T.CARD, fg=T.TEXT_MUTE,
+                 font=T.fonts["small"]).pack(side=tk.LEFT, padx=(T.SM, 0))
 
-        self._icon_refs[f"src_{row}"] = icons.get_icon(icon_name, size=T.px(26))
-        tk.Label(head, image=self._icon_refs[f"src_{row}"], bg=T.CARD).grid(
-            row=0, column=0, sticky="w", padx=(0, T.SM))
-        tk.Label(head, text=label, bg=T.CARD, fg=T.TEXT_DIM,
-                 font=T.fonts["small"], anchor="w").grid(row=0, column=1,
-                                                         sticky="w")
-
-        combo = ttk.Combobox(head, state="readonly", style="Dark.TCombobox",
+        combo = ttk.Combobox(frame, state="readonly", style="Dark.TCombobox",
                              font=T.fonts["body"])
-        combo.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(T.px(6), T.px(6)))
+        combo.grid(row=1, column=1, sticky="ew", pady=(T.XS, T.SM))
         combo.bind("<<ComboboxSelected>>", lambda _e: self.restart_monitoring())
 
-        meter = W.Meter(head, width=560, height=18)
-        meter.grid(row=2, column=0, columnspan=3, sticky="ew")
+        meter = W.Meter(frame, width=560, height=14, colour=colour)
+        meter.grid(row=2, column=1, sticky="ew")
 
-
-        gain_row = tk.Frame(head, bg=T.CARD)
-        gain_row.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(T.px(5), 0))
+        gain_row = tk.Frame(frame, bg=T.CARD)
+        gain_row.grid(row=3, column=1, sticky="ew", pady=(T.XS, 0))
         gain_row.columnconfigure(1, weight=1)
         tk.Label(gain_row, text="Gain", bg=T.CARD, fg=T.TEXT_MUTE,
-                 font=T.fonts["tiny"], width=5, anchor="w").grid(row=0, column=0)
+                 font=T.fonts["small"], anchor="w").grid(row=0, column=0,
+                                                         padx=(0, T.SM))
         slider = W.Slider(gain_row, from_=-20.0, to=20.0, command=gain_command,
-                          width=480)
+                          width=480, colour=colour)
         slider.grid(row=0, column=1, sticky="ew")
         value = tk.Label(gain_row, text="+0.0 dB", bg=T.CARD, fg=T.TEXT_DIM,
                          font=T.fonts["mono_small"], width=9, anchor="e")
@@ -256,8 +265,8 @@ class RecorderApp:
 
     # ------------------------------------------------------------------
     def _build_ai(self, parent):
-        card = W.Card(parent, title="Transcription Engine", icon_name="sparkle")
-        card.pack(fill=tk.X, pady=(0, T.SM))
+        card = W.Card(parent, title="Transcription", icon_name="sparkle")
+        card.pack(fill=tk.X, pady=(0, T.MD))
         body = card.body
         body.columnconfigure(0, weight=3, uniform="ai")
         body.columnconfigure(1, weight=2, uniform="ai")
@@ -267,8 +276,8 @@ class RecorderApp:
         model_field.grid(row=0, column=0, sticky="ew", padx=(0, T.MD))
         self.model_combo = model_field.widget
         self.model_combo.current(config.model_index(self.settings.model))
-        self.model_combo.bind("<<ComboboxSelected>>",
-                              lambda _e: self._refresh_key_state())
+        self.model_combo.bind("<<ComboboxSelected>>", lambda _e: (
+            self._refresh_key_state(), self._refresh_subtitle()))
 
         lang_field = W.Field(body, "Language", lambda p: _combo(
             p, [choice[0] for choice in config.LANGUAGE_CHOICES]), icon_name="globe")
@@ -276,60 +285,55 @@ class RecorderApp:
         self.lang_combo = lang_field.widget
         self.lang_combo.current(_index_of(config.LANGUAGE_CHOICES,
                                           self.settings.language))
+        self.lang_combo.bind("<<ComboboxSelected>>",
+                             lambda _e: self._refresh_subtitle())
 
         # --- API key ---------------------------------------------------
-        key_wrap = tk.Frame(body, bg=T.CARD)
-        key_wrap.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(T.MD, 0))
-        key_wrap.columnconfigure(0, weight=1)
+        # Shown only while the cloud engine is chosen (_refresh_key_state):
+        # with a local model it was a disabled field taking a third of the card.
+        def show_button(parent):
+            self.show_key_btn = W.Button(parent, text="Show", icon_name="eye",
+                                         kind="ghost", width=84, height=34,
+                                         command=self._toggle_key)
+            return self.show_key_btn
 
         self.key_field = W.Field(
-            key_wrap, "ElevenLabs API key",
+            body, "ElevenLabs API key",
             lambda p: ttk.Entry(p, show="•", style="Dark.TEntry",
                                 font=T.fonts["body"]),
             hint=KEY_HINT_STORED if config.key_can_be_stored() else KEY_HINT_SESSION,
-            icon_name="lock")
-        self.key_field.grid(row=0, column=0, sticky="ew")
+            icon_name="lock", aside=show_button)
+        self.key_field.grid(row=1, column=0, columnspan=2, sticky="ew",
+                            pady=(T.MD, 0))
         self.api_entry = self.key_field.widget
         self.api_entry.insert(0, self.settings.api_key)
-
-        self.show_key_btn = W.Button(key_wrap, text="show", icon_name="eye",
-                                     kind="ghost", width=84, height=32,
-                                     command=self._toggle_key)
-        self.show_key_btn.grid(row=0, column=1, sticky="n",
-                               padx=(T.SM, 0), pady=(T.px(22), 0))
         self._key_visible = False
 
     # ------------------------------------------------------------------
     def _build_output_folder(self, parent):
-        card = W.Card(parent, title="Output Directory", icon_name="folder")
-        card.pack(fill=tk.X, pady=(0, T.SM))
+        card = W.Card(parent, title="Output folder", icon_name="folder")
+        card.pack(fill=tk.X, pady=(0, T.MD))
         body = card.body
         body.columnconfigure(0, weight=1)
 
-        wrap = tk.Frame(body, bg=T.CARD)
-        wrap.grid(row=0, column=0, sticky="ew")
-        wrap.columnconfigure(0, weight=1)
+        def buttons(parent):
+            frame = tk.Frame(parent, bg=T.CARD)
+            W.Button(frame, text="Browse…", icon_name="folder", kind="ghost",
+                     width=100, height=34,
+                     command=self._browse_output_dir).pack(side=tk.LEFT)
+            W.Button(frame, text="Reset", kind="quiet", width=74, height=34,
+                     command=self._reset_output_dir).pack(side=tk.LEFT,
+                                                          padx=(T.XS, 0))
+            return frame
 
         self.out_dir_field = W.Field(
-            wrap, "Target Folder",
+            body, "Folder",
             lambda p: ttk.Entry(p, style="Dark.TEntry", font=T.fonts["body"]),
-            hint="Custom directory where transcripts (.txt) and audio (.wav) will be saved.",
-            icon_name="globe"
-        )
-
+            hint="Recordings (.wav) and transcripts (.txt) are saved here.",
+            aside=buttons)
         self.out_dir_field.grid(row=0, column=0, sticky="ew")
         self.output_dir_entry = self.out_dir_field.widget
         self.output_dir_entry.insert(0, self.settings.output_dir or paths.OUT_DIR)
-
-        browse_btn = W.Button(wrap, text="Browse...", icon_name="upload",
-                              kind="quiet", width=100, height=32,
-                              command=self._browse_output_dir)
-        browse_btn.grid(row=0, column=1, sticky="s", padx=(T.SM, 0), pady=(T.px(22), 0))
-
-        reset_btn = W.Button(wrap, text="Reset", kind="ghost",
-                             width=74, height=32,
-                             command=self._reset_output_dir)
-        reset_btn.grid(row=0, column=2, sticky="s", padx=(T.XS, 0), pady=(T.px(22), 0))
 
     def _browse_output_dir(self):
         current = self.output_dir_entry.get().strip() or self.settings.get_output_dir()
@@ -347,15 +351,11 @@ class RecorderApp:
 
     # ------------------------------------------------------------------
     def _build_options_card(self, parent):
-        card = W.Card(parent, title="Processing Options", icon_name="settings")
-        card.pack(fill=tk.X, pady=(0, T.SM))
+        card = W.Card(parent, title="Processing", icon_name="settings")
+        card.pack(fill=tk.X, pady=(0, T.MD))
 
         body = card.body
-        body.columnconfigure(0, weight=1)
-
-        options = tk.Frame(body, bg=T.CARD)
-        options.grid(row=0, column=0, sticky="ew")
-        options.columnconfigure(0, weight=1)
+        body.columnconfigure((0, 1), weight=1, uniform="option")
 
         self.live_var = tk.BooleanVar(value=self.settings.live_transcribe)
         self.preview_var = tk.BooleanVar(value=self.settings.live_preview)
@@ -364,88 +364,136 @@ class RecorderApp:
         self.gpu_var = tk.BooleanVar(value=self.settings.use_gpu)
         self.keep_raw_var = tk.BooleanVar(value=self.settings.keep_raw_tracks)
 
-        # The switches wrap onto a second line where the width runs out, and
-        # the hint below wraps too: six switches in grid columns plus a long
-        # one-line hint pushed the last of them out of the window.
-        switches = W.Flow(options)
-        switches.grid(row=0, column=0, sticky="ew")
-        for caption, variable in (("Live transcription", self.live_var),
-                                  ("Live preview", self.preview_var),
-                                  ("Separate tracks", self.separate_var),
-                                  ("VAD", self.vad_var),
-                                  ("Keep raw tracks", self.keep_raw_var),
-                                  ("GPU", self.gpu_var)):
-            switches.add(W.Switch(switches, caption, variable))
+        # Every switch with a line on what it does, next to it - not one
+        # paragraph below all six that explained two of them. Two columns; the
+        # descriptions wrap to the width there is (W.WrapLabel).
+        options = (
+            ("Live transcription", self.live_var,
+             "Transcribes while you record, so the transcript is ready right "
+             "after Stop. Local models only."),
+            ("Live preview", self.preview_var,
+             "Shows the text in the Transcript tab as it is recognised."),
+            ("Separate tracks", self.separate_var,
+             "Transcribes your voice and the system audio one after the other, "
+             "for exact speakers. Off: one quicker pass over the mix."),
+            ("VAD", self.vad_var,
+             "Voice activity detection: leaves out silence before transcribing. "
+             "Off keeps the timestamps exact."),
+            ("Keep raw tracks", self.keep_raw_var,
+             "Keeps both recorded tracks next to the transcript, as .mic.wav "
+             "and .sys.wav."),
+            ("GPU", self.gpu_var,
+             "Lets whisper.cpp use the graphics card where its build can; a run "
+             "that fails there is repeated on the CPU."),
+        )
+        indent = T.px(W.Switch.TRACK_W + 10)
+        for index, (caption, variable, text) in enumerate(options):
+            column = index % 2
+            tile = tk.Frame(body, bg=T.CARD)
+            tile.grid(row=index // 2, column=column, sticky="new",
+                      padx=(0, T.XL) if column == 0 else 0,
+                      pady=(T.MD if index >= 2 else 0, 0))
+            W.Switch(tile, caption, variable).pack(anchor="w")
+            W.WrapLabel(tile, text=text).pack(fill=tk.X, padx=(indent, 0),
+                                               pady=(T.px(2), 0))
 
-        self.save_settings_btn = W.Button(options, text="Save settings",
-                                          kind="ghost", width=150, height=32,
+    def _build_settings_footer(self, parent):
+        footer = tk.Frame(parent, bg=T.BG)
+        footer.pack(fill=tk.X, pady=(0, T.SM))
+        footer.columnconfigure(0, weight=1)
+        W.WrapLabel(footer, bg=T.BG,
+                    text="Changes apply to the next recording right away; "
+                         "Save keeps them for the next start.").grid(
+            row=0, column=0, sticky="ew", padx=(T.XS, T.LG))
+        self.save_settings_btn = W.Button(footer, text="Save settings",
+                                          icon_name="check", kind="accent",
+                                          bg=T.BG, width=150, height=38,
                                           command=self.save_settings)
-        self.save_settings_btn.grid(row=0, column=1, sticky="ne", padx=(T.MD, 0))
-
-        W.WrapLabel(options,
-                    text="Live transcription recognises the recording while it "
-                         "runs, so stopping only has to catch up with the last "
-                         "few seconds. Local models only. GPU lets whisper.cpp "
-                         "use the graphics card where its build supports that; "
-                         "if a run fails there it is repeated on the CPU.").grid(
-            row=1, column=0, columnspan=2, sticky="ew", pady=(T.SM, 0))
+        self.save_settings_btn.grid(row=0, column=1, sticky="e")
 
 
     # ------------------------------------------------------------------
     def _build_record_bar(self, parent):
-        card = W.Card(parent)
-        card.pack(fill=tk.X, pady=(0, T.SM))
+        # A grey dot: a red one in the heading looked like a recording running.
+        card = W.Card(parent, title="Recording", icon_name="record",
+                      icon_colour=T.TEXT_DIM)
+        card.pack(fill=tk.X, pady=(0, T.MD))
         body = card.body
         body.columnconfigure(0, weight=1)
 
-        name_field = W.Field(body, "File name", lambda p: ttk.Entry(
-            p, style="Dark.TEntry", font=T.fonts["body"]))
-        name_field.grid(row=0, column=0, sticky="ew", padx=(0, T.LG))
-        self.filename_entry = name_field.widget
+        tk.Label(body, text="File name", bg=T.CARD, fg=T.TEXT_DIM,
+                 font=T.fonts["small"], anchor="w").grid(
+            row=0, column=0, sticky="w", pady=(0, T.px(4)))
+        self.filename_entry = ttk.Entry(body, style="Dark.TEntry",
+                                        font=T.fonts["body"])
+        self.filename_entry.grid(row=1, column=0, sticky="ew", padx=(0, T.LG))
         self.filename_entry.insert(0, self.settings.filename)
 
         self.timer_label = tk.Label(body, text="00:00", bg=T.CARD,
-                                    fg=T.TEXT_MUTE, font=T.fonts["display"])
-        self.timer_label.grid(row=0, column=1, sticky="s", padx=(0, T.LG),
-                              pady=(0, T.px(2)))
+                                    fg=T.TEXT_MUTE, font=T.fonts["timer"])
+        self.timer_label.grid(row=1, column=1, padx=(0, T.LG))
 
         self.upload_btn = W.Button(body, text="Upload file", icon_name="upload",
-                                   kind="quiet", width=130, height=42,
+                                   kind="ghost", width=130, height=42,
                                    command=self.upload_and_transcribe)
-        self.upload_btn.grid(row=0, column=2, sticky="s", padx=(0, T.SM), pady=(0, T.px(1)))
+        self.upload_btn.grid(row=1, column=2, padx=(0, T.SM))
 
+        # Start and Stop share a place: while a recording runs, Stop is the
+        # only thing that can be done, and a Stop button that is disabled
+        # the rest of the time only looked broken.
         self.start_btn = W.Button(body, text="Start recording", icon_name="record",
                                   kind="record", width=170, height=42,
                                   command=self.start_recording)
-        self.start_btn.grid(row=0, column=3, sticky="s", pady=(0, T.px(1)))
+        self.start_btn.grid(row=1, column=3, sticky="e")
 
-        self.stop_btn = W.Button(body, text="Stop", icon_name="stop", kind="stop",
-                                 width=100, height=42, state="disabled",
+        self.stop_btn = W.Button(body, text="Stop recording", icon_name="stop",
+                                 kind="stop", width=170, height=42, state="disabled",
                                  command=self.stop_recording)
-        self.stop_btn.grid(row=0, column=4, sticky="s", padx=(T.SM, 0),
-                           pady=(0, T.px(1)))
+        self.stop_btn.grid(row=1, column=3, sticky="e")
+        self.stop_btn.grid_remove()
+
+        W.WrapLabel(body, text="The recording and its transcript are saved "
+                               "under this name in the output folder. F5 starts "
+                               "and stops a recording.").grid(
+            row=2, column=0, columnspan=4, sticky="ew", pady=(T.SM, 0))
+
+    def _show_stop(self, show):
+        """Stop in place of Start while a recording runs, and back."""
+        hidden, shown = ((self.start_btn, self.stop_btn) if show
+                         else (self.stop_btn, self.start_btn))
+        hidden.grid_remove()
+        shown.grid()
 
 
     # ------------------------------------------------------------------
     def _build_transcript(self, parent):
         card = W.Card(parent, title="Transcript", icon_name="transcript", stretch=True)
-        card.pack(fill=tk.BOTH, expand=True)
+        card.pack(fill=tk.BOTH, expand=True, pady=(0, T.SM))
 
         toolbar = tk.Frame(card.body, bg=T.CARD)
-        toolbar.pack(fill=tk.X, pady=(0, T.XS))
+        toolbar.pack(fill=tk.X, pady=(0, T.SM))
+
+        # Which colour is who, in the words of the transcript.
+        for colour, who in ((T.SPEAKER_SELF, "You"), (T.SPEAKER_OTHER, "Participants")):
+            tk.Label(toolbar, text="●", bg=T.CARD, fg=colour,
+                     font=T.fonts["small"]).pack(side=tk.LEFT)
+            tk.Label(toolbar, text=who, bg=T.CARD, fg=T.TEXT_DIM,
+                     font=T.fonts["small"]).pack(side=tk.LEFT, padx=(T.px(4), T.LG))
 
         self.clear_btn = W.Button(toolbar, text="Clear", icon_name="trash", kind="quiet",
-                                  width=80, height=28, command=lambda: self.transcript.clear())
+                                  width=80, height=32, command=lambda: self.transcript.clear())
         self.clear_btn.pack(side=tk.RIGHT)
 
         self.save_transcript_btn = W.Button(toolbar, text="Save", icon_name="save",
-                                            kind="quiet", width=80, height=28,
+                                            kind="ghost", width=80, height=32,
                                             command=self._save_transcript)
-        self.save_transcript_btn.pack(side=tk.RIGHT, padx=(0, T.XS))
+        self.save_transcript_btn.pack(side=tk.RIGHT, padx=(0, T.SM))
 
-        self.copy_btn = W.Button(toolbar, text="Copy", icon_name="copy", kind="quiet",
-                                 width=80, height=28, command=self._copy_transcript)
-        self.copy_btn.pack(side=tk.RIGHT, padx=(0, T.XS))
+        self.copy_btn = W.Button(toolbar, text="Copy", icon_name="copy", kind="ghost",
+                                 width=80, height=32, command=self._copy_transcript)
+        self.copy_btn.pack(side=tk.RIGHT, padx=(0, T.SM))
+
+        tk.Frame(card.body, bg=T.BORDER, height=1).pack(fill=tk.X, pady=(0, T.SM))
 
         self.transcript = W.Transcript(card.body)
         self.transcript.pack(fill=tk.BOTH, expand=True)
@@ -646,6 +694,7 @@ class RecorderApp:
         self.recording_started_at = time.monotonic()
         self.start_btn.config(state="disabled")
         self.stop_btn.config(state="normal")
+        self._show_stop(True)
         self.mic_combo.config(state="disabled")
         self.sys_combo.config(state="disabled")
         self.timer_label.config(fg=T.REC)
@@ -727,6 +776,7 @@ class RecorderApp:
 
     def stop_recording(self):
         self.stop_btn.config(state="disabled")
+        self._show_stop(False)           # Start stays disabled until it is done
         self.status.set("stopping…", T.WARN)
         self.recording_started_at = None
         self.timer_label.config(fg=T.TEXT_MUTE)
@@ -847,6 +897,7 @@ class RecorderApp:
         self.start_btn.config(state="normal")
         self.upload_btn.config(state="normal")
         self.stop_btn.config(state="disabled")
+        self._show_stop(False)
         self.mic_combo.config(state="readonly")
         self.sys_combo.config(state="readonly")
         self.recording_started_at = None
@@ -987,17 +1038,26 @@ class RecorderApp:
             return
         self.status.set("settings saved", T.OK)
 
+    def _refresh_subtitle(self):
+        self.subtitle.config(text=_engine_summary(
+            config.model_key(self.model_combo.current()),
+            config.LANGUAGE_CHOICES[max(0, self.lang_combo.current())][1]))
+
     def _refresh_key_state(self):
         """The API key only matters for the cloud backend."""
         uses_cloud = config.model_key(self.model_combo.current()) == config.CLOUD_MODEL
         self.api_entry.config(state="normal" if uses_cloud else "disabled")
         self.show_key_btn.config(state="normal" if uses_cloud else "disabled")
+        if uses_cloud:
+            self.key_field.grid()
+        else:
+            self.key_field.grid_remove()
 
     def _toggle_key(self):
         self._key_visible = not self._key_visible
         self.api_entry.config(show="" if self._key_visible else "•")
         self.show_key_btn.configure(
-            text="hide" if self._key_visible else "show",
+            text="Hide" if self._key_visible else "Show",
             icon_name="eye_off" if self._key_visible else "eye"
         )
 
@@ -1141,6 +1201,18 @@ _STATUS_COLOURS = {
 
 def _colour(name):
     return _STATUS_COLOURS.get(name, T.TEXT_MUTE)
+
+
+def _engine_summary(model, language):
+    """'whisper.cpp small, on this computer · German': what a run will use."""
+    if model == config.CLOUD_MODEL:
+        engine = "ElevenLabs Scribe, in the cloud"
+    else:
+        engine = f"whisper.cpp {model}, on this computer"
+    names = {code: label for label, code in config.LANGUAGE_CHOICES}
+    spoken = ("language detected automatically" if language == "auto"
+              else names.get(language, language))
+    return f"{engine} · {spoken}"
 
 
 def _combo(parent, values):

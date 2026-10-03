@@ -25,7 +25,8 @@ class Card(tk.Canvas):
     """
 
     def __init__(self, parent, title=None, hint=None, pad=(16, 13),
-                 bg=T.BG, fill=T.CARD, stretch=False, icon_name=None):
+                 bg=T.BG, fill=T.CARD, stretch=False, icon_name=None,
+                 icon_colour=None):
         super().__init__(parent, bg=bg, highlightthickness=0, bd=0,
                          height=T.px(64))
         self.padx, self.pady = T.px(pad[0]), T.px(pad[1])
@@ -33,7 +34,7 @@ class Card(tk.Canvas):
         self._title = title
         self._hint = hint
         self._icon_name = icon_name
-        self._head_h = T.px(26) if title else 0
+        self._head_h = T.px(32) if title else 0
         self._shape = None
         self._icon_img = None
         self._syncing = False
@@ -48,13 +49,14 @@ class Card(tk.Canvas):
         if title:
             x_off = self.padx
             if icon_name:
-                self._icon_img = icons.get_icon(icon_name, size=T.px(16))
-                self.create_image(self.padx, self.pady - 1, anchor="nw", image=self._icon_img)
-                x_off += T.px(22)
+                self._icon_img = icons.get_icon(icon_name, size=T.px(18),
+                                                fg=icon_colour)
+                self.create_image(self.padx, self.pady, anchor="nw", image=self._icon_img)
+                x_off += T.px(26)
             self._title_item = self.create_text(
-                x_off, self.pady - 1, anchor="nw", text=title.upper(),
-                fill=T.TEXT_DIM, font=T.fonts["section"])
-            self._title_end = x_off + T.fonts["section"].measure(title.upper())
+                x_off, self.pady - 1, anchor="nw", text=title,
+                fill=T.TEXT, font=T.fonts["card_title"])
+            self._title_end = x_off + T.fonts["card_title"].measure(title)
 
         # The line at the right of the heading. Always there: set_hint() used to
         # do nothing on a card made without one, and the Sources card - whose
@@ -62,7 +64,7 @@ class Card(tk.Canvas):
         # without.
         self._hint_text = hint or ""
         self._hint_item = self.create_text(
-            0, self.pady - 1, anchor="ne", text=self._hint_text,
+            0, self.pady + 1, anchor="ne", text=self._hint_text,
             fill=T.TEXT_MUTE, font=T.fonts["tiny"])
 
         self.bind("<Configure>", self._sync)
@@ -80,7 +82,7 @@ class Card(tk.Canvas):
             text = T.ellipsize(T.fonts["tiny"], text, max(0, room))
         self.itemconfigure(self._hint_item, text=text,
                            fill=T.WARN if text.startswith("⚠") else T.TEXT_MUTE)
-        self.coords(self._hint_item, max(width, 1) - self.padx, self.pady - 1)
+        self.coords(self._hint_item, max(width, 1) - self.padx, self.pady + 1)
 
     def _sync(self, _event=None):
         if self._syncing:
@@ -126,12 +128,14 @@ class Button(tk.Canvas):
     kind: 'accent' | 'record' | 'stop' | 'ghost' | 'quiet'
     """
 
+    # kind: (fill, fill under the pointer, fill while pressed, text, border).
+    # An icon takes the colour of the text.
     _PALETTE = {
-        "accent": (T.ACCENT, T.ACCENT_HI, T.ACCENT_LO, "#ffffff", None),
+        "accent": (T.ACCENT, T.ACCENT_HI, T.ACCENT_LO, T.ON_ACCENT, None),
         "record": (T.REC, T.REC_HI, "#d93a48", "#ffffff", None),
-        "stop": (T.CARD_HI, "#2e3440", "#20242c", T.TEXT, T.BORDER_HI),
+        "stop": (T.REC_TINT, "#3a1a23", "#22101a", T.REC_HI, T.REC),
         "ghost": (None, T.CARD_HI, T.BG_DEEP, T.TEXT_DIM, T.BORDER),
-        "quiet": (None, T.CARD_HI, T.BG_DEEP, T.TEXT_MUTE, None),
+        "quiet": (None, T.CARD_HI, T.BG_DEEP, T.TEXT_DIM, None),
     }
 
     PAD_X = 14                # air at each side of the content, at 96 dpi
@@ -277,8 +281,8 @@ class Button(tk.Canvas):
         # Check for SVG icon
         if self._icon_name and self._icon_name in icons._RENDERERS:
             icon_sz = self._icon_size()
-            self._img_obj = icons.get_icon(self._icon_name, size=icon_sz)
-            
+            self._img_obj = icons.get_icon(self._icon_name, size=icon_sz, fg=fg)
+
             font = T.fonts["button"]
             text_w = font.measure(self._text) if self._text else 0
             gap = T.px(8) if self._text else 0
@@ -367,7 +371,7 @@ class Slider(tk.Canvas):
     KNOB_R = 7
 
     def __init__(self, parent, from_=-20.0, to=20.0, value=0.0, command=None,
-                 width=280, bg=T.CARD, centered=True):
+                 width=280, bg=T.CARD, centered=True, colour=T.ACCENT):
         self._height = T.px(self.HEIGHT)
         self._knob_r = T.px(self.KNOB_R)
         super().__init__(parent, bg=bg, highlightthickness=0, bd=0,
@@ -375,6 +379,7 @@ class Slider(tk.Canvas):
         self.from_, self.to = from_, to
         self._value = value
         self._command = command
+        self._colour = colour
         self._centered = centered      # fill from the centre instead of the left
         self._hover = False
         self._dragging = False
@@ -462,13 +467,13 @@ class Slider(tk.Canvas):
 
         if abs(right - left) > 1:
             T.round_rect(self, left, mid - half, right, mid + half, half,
-                         fill=T.ACCENT, outline="")
+                         fill=self._colour, outline="")
 
         radius = self._knob_r + (1 if self._hover or self._dragging else 0)
         self.create_oval(knob_x - radius, mid - radius,
                          knob_x + radius, mid + radius,
                          fill="#ffffff" if self._hover or self._dragging else T.TEXT,
-                         outline=T.ACCENT if self._dragging else "", width=2)
+                         outline=self._colour if self._dragging else "", width=2)
 
 
 # ======================================================================
@@ -476,7 +481,9 @@ class Meter(tk.Canvas):
     """A level meter with blocks, peak marker and dB readout.
 
     The ballistics are time based (not tied to the call frequency) and
-    0 dBFS corresponds to full scale.
+    0 dBFS corresponds to full scale. The normal range is drawn in `colour` -
+    the colour of the voice the source carries - and the loud end in amber
+    and red, as on any meter.
     """
 
     MIN_DB, MAX_DB = -60.0, 0.0
@@ -485,12 +492,14 @@ class Meter(tk.Canvas):
     PEAK_FALL_DB_S = 14.0
     READOUT_W = 66
 
-    def __init__(self, parent, width=320, height=14, blocks=44, bg=T.CARD):
+    def __init__(self, parent, width=320, height=14, blocks=44, bg=T.CARD,
+                 colour=T.METER_LOW):
         width, height = T.px(width), T.px(height)
         super().__init__(parent, bg=bg, highlightthickness=0, bd=0,
                          width=width, height=height)
         self._height = height
         self._block_count = blocks
+        self._colour = colour
         # Room for the readout: at least READOUT_W (at 96 dpi), and always what
         # the widest reading takes in the font it is set in.
         self._readout_w = max(T.px(self.READOUT_W),
@@ -530,7 +539,7 @@ class Meter(tk.Canvas):
             x0 = index * step
             share = (index + 1) / self._block_count
             if share <= 0.68:
-                on, off = T.METER_LOW, T.METER_OFF_LOW
+                on, off = self._colour, T.mix(T.METER_BG, self._colour, 0.16)
             elif share <= 0.88:
                 on, off = T.METER_MID, T.METER_OFF_MID
             else:
@@ -663,7 +672,15 @@ class StatusPill(tk.Canvas):
 
 # ======================================================================
 class Transcript(tk.Frame):
-    """The transcript pane with speaker colours and a slim scrollbar."""
+    """The transcript pane with speaker colours and a slim scrollbar.
+
+    The scrollbar shows only while there is something to scroll - before, an
+    empty pane had a grey bar its whole height - and an empty pane says what
+    will appear in it.
+    """
+
+    PLACEHOLDER = ("Nothing here yet. Start a recording or upload a file, and "
+                   "the transcript appears here.")
 
     def __init__(self, parent, height=14, bg=T.CARD):
         super().__init__(parent, bg=bg)
@@ -676,9 +693,12 @@ class Transcript(tk.Frame):
         self.scroll = ttk.Scrollbar(self, orient="vertical",
                                     style="Dark.Vertical.TScrollbar",
                                     command=self.text.yview)
-        self.text.configure(yscrollcommand=self.scroll.set)
+        self.text.configure(yscrollcommand=self._on_scroll)
         self.text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.scroll.pack(side=tk.RIGHT, fill=tk.Y, padx=(T.XS, 0))
+        self.placeholder = WrapLabel(self, text=self.PLACEHOLDER, bg=bg,
+                                     font=T.fonts["small"], anchor="center",
+                                     justify="center")
+        self._show_placeholder()
 
         self.text.tag_configure("ts", foreground=T.TIMESTAMP)
         self.text.tag_configure("self", foreground=T.SPEAKER_SELF,
@@ -799,6 +819,30 @@ class Transcript(tk.Frame):
             action()
         finally:
             self.text.config(state=tk.DISABLED)
+            self._show_placeholder()
+
+    def _show_placeholder(self):
+        if self.text.compare("end-1c", "==", "1.0"):
+            self.placeholder.place(relx=0.5, rely=0.4, anchor="center",
+                                   relwidth=0.8)
+        else:
+            self.placeholder.place_forget()
+
+    def _on_scroll(self, first, last):
+        """The scrollbar's set(), showing the bar only while it has a use.
+
+        No back and forth: with the bar the text is narrower and only gets
+        longer, without it wider and only shorter. Packed or not is asked of
+        the packer - winfo_ismapped() is also false while the tab is hidden.
+        """
+        self.scroll.set(first, last)
+        needed = float(first) > 0.0 or float(last) < 1.0
+        packed = bool(self.scroll.winfo_manager())
+        if needed and not packed:
+            self.scroll.pack(side=tk.RIGHT, fill=tk.Y, padx=(T.XS, 0),
+                             before=self.text)
+        elif packed and not needed:
+            self.scroll.pack_forget()
 
 
 _SPEAKER_RE = re.compile(r"^(\s*\[[^\]]+\]\s*:)(.*)$", re.S)
@@ -966,9 +1010,15 @@ class Scroller(tk.Frame):
 
 # ======================================================================
 class Field(tk.Frame):
-    """A labelled entry or select field with an optional icon."""
+    """A labelled entry or select field with an optional icon.
 
-    def __init__(self, parent, label, widget_factory, bg=T.CARD, hint=None, icon_name=None):
+    `aside` makes what belongs next to the field - a button, a frame of them -
+    on the same line as the field itself, above the hint. Placed beside the
+    whole Field, such buttons sat level with the hint instead.
+    """
+
+    def __init__(self, parent, label, widget_factory, bg=T.CARD, hint=None,
+                 icon_name=None, aside=None):
         super().__init__(parent, bg=bg)
         lbl_frame = tk.Frame(self, bg=bg)
         lbl_frame.pack(fill=tk.X, pady=(0, T.px(4)))
@@ -979,8 +1029,149 @@ class Field(tk.Frame):
                 side=tk.LEFT, padx=(0, T.px(5)))
         tk.Label(lbl_frame, text=label, bg=bg, fg=T.TEXT_DIM, font=T.fonts["small"],
                  anchor="w").pack(side=tk.LEFT, fill=tk.X)
-        self.widget = widget_factory(self)
-        self.widget.pack(fill=tk.X)
+        row = tk.Frame(self, bg=bg)
+        row.pack(fill=tk.X)
+        self.aside = None
+        if aside is not None:
+            # Packed first, so that a narrow window squeezes the field, not it.
+            self.aside = aside(row)
+            self.aside.pack(side=tk.RIGHT, padx=(T.SM, 0))
+        self.widget = widget_factory(row)
+        self.widget.pack(side=tk.LEFT, fill=tk.X, expand=True)
         if hint:
             self.hint = WrapLabel(self, text=hint, bg=bg)
             self.hint.pack(fill=tk.X, pady=(T.px(4), 0))
+
+
+# ======================================================================
+class Tabs(tk.Frame):
+    """Pages under a bar of tabs, one page shown at a time.
+
+    It replaces ttk.Notebook, which in the clam theme framed every page with a
+    light line and drew the selected tab smaller than the others, so the row
+    jumped at every click. Here the tabs are the segments of one bar; all of
+    them keep their size, and the selected one is lifted out. add() and
+    select() work like the notebook's, which is all the window and the tests
+    ask of it.
+
+    Create the pages with the Tabs as their parent.
+    """
+
+    HEIGHT = 42                  # at 96 dpi
+    PAD_X = 20                   # air at each side of a tab's content
+    INSET = 4                    # between the bar's edge and a lifted tab
+    ICON = 18
+
+    def __init__(self, parent, bg=T.BG):
+        super().__init__(parent, bg=bg)
+        self.bar = tk.Canvas(self, bg=bg, highlightthickness=0, bd=0,
+                             height=T.px(self.HEIGHT))
+        self.bar.pack(fill=tk.X, pady=(0, T.LG))
+        self._tabs = []                  # (page, text, icon_name)
+        self._current = None
+        self._hover = None
+        self.bar.bind("<Motion>", self._on_motion)
+        self.bar.bind("<Leave>", lambda _e: self._set_hover(None))
+        self.bar.bind("<Button-1>", self._on_click)
+
+    # -- API like ttk.Notebook ------------------------------------------
+    def add(self, page, text="", icon_name=None):
+        self._tabs.append((page, text, icon_name))
+        self.bar.configure(width=self._bar_width())
+        if self._current is None:
+            self.select(page)
+        else:
+            self._draw()
+
+    def select(self, page=None):
+        """Show `page`. Without one: the page that is shown."""
+        if page is None or page is self._current:
+            return self._current
+        if self._current is not None:
+            self._current.pack_forget()
+        self._current = page
+        page.pack(fill=tk.BOTH, expand=True)
+        self._draw()
+        self.event_generate("<<NotebookTabChanged>>")
+        return page
+
+    def pages(self):
+        return [page for page, _text, _icon in self._tabs]
+
+    # -- Geometry -------------------------------------------------------
+    def _tab_width(self):
+        """One width for all: the widest caption decides."""
+        font = T.fonts["button"]
+        widest = max((font.measure(text) for _page, text, _icon in self._tabs),
+                     default=0)
+        return widest + T.px(self.ICON) + T.px(8) + 2 * T.px(self.PAD_X)
+
+    def _bar_width(self):
+        return len(self._tabs) * self._tab_width() + 2 * T.px(self.INSET)
+
+    def _tab_at(self, x):
+        index = int((x - T.px(self.INSET)) // max(1, self._tab_width()))
+        return index if 0 <= index < len(self._tabs) and x < self._bar_width() else None
+
+    # -- Events ---------------------------------------------------------
+    def _on_motion(self, event):
+        self._set_hover(self._tab_at(event.x))
+
+    def _set_hover(self, index):
+        if index != self._hover:
+            self._hover = index
+            self.bar.configure(cursor="hand2" if index is not None else "")
+            self._draw()
+
+    def _on_click(self, event):
+        index = self._tab_at(event.x)
+        if index is not None:
+            self.select(self._tabs[index][0])
+
+    # -- Rendering ------------------------------------------------------
+    def _draw(self):
+        bar = self.bar
+        bar.delete("all")
+        height, inset = T.px(self.HEIGHT), T.px(self.INSET)
+        width = self._tab_width()
+        T.round_rect(bar, 0.5, 0.5, self._bar_width() - 0.5, height - 0.5,
+                     T.RADIUS_CTRL + inset, fill=T.FIELD, outline=T.BORDER, width=1)
+
+        font = T.fonts["button"]
+        icon_size = T.px(self.ICON)
+        for index, (page, text, icon_name) in enumerate(self._tabs):
+            x0 = inset + index * width
+            selected = page is self._current
+            hover = index == self._hover and not selected
+            if selected:
+                T.round_rect(bar, x0, inset, x0 + width, height - inset, T.RADIUS_CTRL,
+                             fill=T.CARD_HI, outline=T.BORDER_HI, width=1)
+            elif hover:
+                T.round_rect(bar, x0, inset, x0 + width, height - inset, T.RADIUS_CTRL,
+                             fill=T.CARD, outline="")
+
+            colour = T.TEXT if selected or hover else T.TEXT_DIM
+            content = icon_size + T.px(8) + font.measure(text)
+            x = x0 + (width - content) / 2
+            if icon_name:
+                icon_colour = T.ACCENT if selected else (T.TEXT_DIM if hover else T.TEXT_MUTE)
+                bar.create_image(x + icon_size / 2, height / 2,
+                                 image=icons.get_icon(icon_name, size=icon_size,
+                                                      fg=icon_colour))
+            bar.create_text(x + icon_size + T.px(8), height / 2, anchor="w",
+                            text=text, fill=colour, font=font)
+
+
+# ======================================================================
+class IconBadge(tk.Canvas):
+    """An icon on a plate tinted in its colour - the mark of a source row."""
+
+    def __init__(self, parent, icon_name, colour, size=34, bg=T.CARD):
+        side = T.px(size)
+        super().__init__(parent, width=side, height=side, bg=bg,
+                         highlightthickness=0, bd=0)
+        T.round_rect(self, 0.5, 0.5, side - 0.5, side - 0.5, side * 0.3,
+                     fill=T.mix(bg, colour, 0.16), outline="")
+        self._image = icons.get_icon(icon_name, size=T.px(round(size * 0.56)),
+                                     fg=colour)
+        self.create_image(side / 2, side / 2, image=self._image)
