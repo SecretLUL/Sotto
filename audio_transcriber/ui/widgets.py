@@ -625,12 +625,19 @@ class Transcript(tk.Frame):
         self.text.tag_configure("head", foreground=T.ACCENT,
                                 font=T.fonts["mono"])
 
+        # True while the last line is a progress line that has no newline yet.
+        self._progress_open = False
+
     # -- API ---------------------------------------------------------------
     def clear(self):
-        self._edit(lambda: self.text.delete("1.0", tk.END))
+        def action():
+            self.text.delete("1.0", tk.END)
+            self._progress_open = False
+        self._edit(action)
 
     def append(self, message, tag=None):
         def action():
+            self._end_progress_line()
             for line in message.splitlines(keepends=True):
                 self._insert_line(line, tag)
             self.text.see(tk.END)
@@ -639,6 +646,7 @@ class Transcript(tk.Frame):
     def set_transcript(self, body, header=None, scroll_to_end=False):
         def action():
             self.text.delete("1.0", tk.END)
+            self._progress_open = False
             if header:
                 self.text.insert(tk.END, header + "\n\n", "head")
             for line in body.splitlines():
@@ -650,13 +658,35 @@ class Transcript(tk.Frame):
         self._edit(action)
 
     def replace_last_line(self, message):
+        """Update the progress line at the end of the log in place.
+
+        The first call starts that line - on a fresh one if the log did not end
+        with a newline, so a half-written line is never overwritten - and the
+        following calls replace it. The next append() ends it with a newline;
+        without that the text after a finished download ran on straight after
+        the last percentage ('...at 20.0 MB/sTranscription started.').
+
+        The deletion stops at 'end-1c' on purpose. Tk also removes the
+        PREVIOUS newline when a deletion that starts at a line start reaches
+        END, so the old delete(..., END) swallowed the log line above the
+        progress ('Downloading model ...') on the first update.
+        """
         def action():
-            self.text.delete("end-1c linestart", tk.END)
+            if self._progress_open:
+                self.text.delete("end-1c linestart", "end-1c")
+            elif self.text.index("end-1c") != self.text.index("end-1c linestart"):
+                self.text.insert(tk.END, "\n")
             self._insert_line(message, "system")
             self.text.see(tk.END)
+            self._progress_open = True
         self._edit(action)
 
     # -- Internals ---------------------------------------------------------
+    def _end_progress_line(self):
+        if self._progress_open:
+            self.text.insert(tk.END, "\n")
+            self._progress_open = False
+
     def _insert_line(self, line, tag):
         """Colour timestamps and speakers.
 

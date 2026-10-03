@@ -229,5 +229,67 @@ class TestOutputConflictDialog(unittest.TestCase):
         self.assertIsNone(dialog.result)
 
 
+@unittest.skipUnless(_can_open_window(), "no graphical display available")
+class TestTranscriptProgressLine(unittest.TestCase):
+    """Download progress is one line that is updated in place.
+
+    Regression: the line had no newline, so whatever was logged next ran on
+    straight after the last percentage ('...20.0 MB/sTranscription started.').
+    """
+
+    def setUp(self):
+        from audio_transcriber.ui import theme, widgets
+        self.root = tk.Tk()
+        self.root.withdraw()
+        theme.apply(self.root)
+        self.transcript = widgets.Transcript(self.root)
+
+    def tearDown(self):
+        self.root.destroy()
+
+    def _content(self):
+        return self.transcript.text.get("1.0", "end-1c")
+
+    def test_updates_in_place_and_the_next_log_starts_a_new_line(self):
+        t = self.transcript
+        t.append("Downloading model 'small'…\n")
+        for percent in ("  5.0", " 50.0", "100.0"):
+            t.replace_last_line(f"small: {percent} %")
+        t.append("Transcription started.\n")
+        self.assertEqual(
+            self._content(),
+            "Downloading model 'small'…\nsmall: 100.0 %\nTranscription started.\n")
+
+    def test_never_overwrites_a_half_written_line(self):
+        t = self.transcript
+        t.append("no newline here")
+        t.replace_last_line("progress 1 %")
+        t.replace_last_line("progress 2 %")
+        self.assertEqual(self._content(), "no newline here\nprogress 2 %")
+
+    def test_two_downloads_in_a_row_keep_their_own_lines(self):
+        t = self.transcript
+        t.replace_last_line("whisper.cpp: 100.0 %")
+        t.append("Extracting archive…\n")
+        t.replace_last_line("model: 10.0 %")
+        self.assertEqual(
+            self._content(),
+            "whisper.cpp: 100.0 %\nExtracting archive…\nmodel: 10.0 %")
+
+    def test_clear_forgets_the_progress_line(self):
+        t = self.transcript
+        t.replace_last_line("model: 10.0 %")
+        t.clear()
+        t.append("fresh\n")
+        self.assertEqual(self._content(), "fresh\n")
+
+    def test_set_transcript_forgets_the_progress_line(self):
+        t = self.transcript
+        t.replace_last_line("model: 10.0 %")
+        t.set_transcript("[00:01] [You]: Hello")
+        t.append("next\n")
+        self.assertEqual(self._content(), "[00:01] [You]: Hello\nnext\n")
+
+
 if __name__ == "__main__":
     unittest.main()
