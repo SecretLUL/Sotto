@@ -653,9 +653,20 @@ class FileFinalizer(_ScratchFiles):
 
         # Save audio file to output folder as 16 kHz PCM WAV
         mix_path = os.path.join(out_dir, f"{base_name}.wav")
-        sf.write(mix_path, dsp.limit_peak(audio), dsp.TARGET_RATE, subtype="PCM_16")
         duration_s = len(audio) / float(dsp.TARGET_RATE)
-        bridge.post(Log(f"Audio file loaded: {os.path.basename(mix_path)} ({duration_s:.1f} s)\n"))
+        if _same_file(file_path, mix_path):
+            # The file picked for upload IS the output audio - a recording
+            # chosen from the output folder. Converting it would replace it
+            # with a mono 16 kHz copy, which for the app's own recordings
+            # destroys the two channels (microphone left, system right) they
+            # consist of. It stays exactly as it is.
+            bridge.post(Log(f"Audio file loaded: {os.path.basename(mix_path)} "
+                            f"({duration_s:.1f} s) - left untouched\n"))
+        else:
+            sf.write(mix_path, dsp.limit_peak(audio), dsp.TARGET_RATE,
+                     subtype="PCM_16")
+            bridge.post(Log(f"Audio file loaded: {os.path.basename(mix_path)} "
+                            f"({duration_s:.1f} s)\n"))
 
         # Save normalized WAV into TMP_DIR for ASR
         asr_path = self._scratch_path("file", suffix=".asr.wav")
@@ -850,3 +861,13 @@ def _try_remove(path):
         os.remove(path)
     except OSError:
         pass
+
+
+def _same_file(first, second):
+    """True if both paths are one existing file (links, case and short names
+    included). False when either does not exist - the normal case for a
+    target that is about to be written."""
+    try:
+        return os.path.samefile(first, second)
+    except OSError:
+        return False
