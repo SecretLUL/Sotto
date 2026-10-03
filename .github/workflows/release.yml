@@ -1,36 +1,116 @@
-name: Multi-Platform Release CI/CD
+name: Release
 
+# A release takes nothing but the mouse: Actions -> Release -> "Run workflow",
+# pick which number goes up, done. The version is counted from the newest
+# release tag, all three platforms are built under it, and the tag is pushed
+# only once every build has succeeded - a failed build leaves no tag behind
+# that nothing was ever released under.
+#
+# Pushing a tag by hand still works; that path releases exactly that tag.
 on:
   push:
     tags:
       - 'v*'
+  # The dropdown names the kind of step rather than the number it lands on,
+  # because its options are fixed in this file: showing the next version there
+  # would mean rewriting the workflow with every release.
   workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Which number of the newest release goes up by one (major.minor.patch)'
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
+      dry_run:
+        description: 'Rehearsal: build everything, but push no tag and publish no release'
+        required: false
+        type: boolean
+        default: false
+
+# Two releases in flight at once would race for the same tag.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  # Resolve the release version once so every job and every archive name agrees.
-  # A tag push uses the tag; a manual dispatch produces a dev version.
   version:
-    name: Resolve Release Version
+    name: Resolve version
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
     steps:
-      - name: Resolve version from tag or dispatch
-        id: resolve
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      # Inputs reach the shell through the environment rather than through
+      # ${{ }} interpolation, which would splice them into the script itself.
+      - name: Resolve version
+        id: v
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BUMP: ${{ inputs.bump }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
-          if [ "${{ github.ref_type }}" = "tag" ]; then
-            VERSION="${{ github.ref_name }}"
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            # A real release comes from the default branch; a rehearsal may run
+            # anywhere, which is how the workflow itself can be tried out.
+            if [ "$DRY_RUN" != "true" ] && [ "$GITHUB_REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
+              echo "::error::Releases are made from $DEFAULT_BRANCH. Pick it under 'Use workflow from', or tick the rehearsal to try another branch."
+              exit 1
+            fi
+
+            # Counted from the newest release tag on the remote. Pre-releases
+            # such as v1.2.0-rc1 do not count.
+            latest=$(git ls-remote --tags --refs origin 'refs/tags/v*' \
+              | sed -n 's#.*refs/tags/v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$#\1#p' \
+              | sort -V | tail -n 1)
+            if [ -z "$latest" ]; then
+              echo "::error::There is no release tag (vX.Y.Z) to count from."
+              exit 1
+            fi
+            IFS=. read -r major minor patch <<< "$latest"
+            case "$BUMP" in
+              major) version="$((major + 1)).0.0" ;;
+              minor) version="$major.$((minor + 1)).0" ;;
+              patch) version="$major.$minor.$((patch + 1))" ;;
+              *) echo "::error::Unknown bump: '$BUMP'"; exit 1 ;;
+            esac
+            echo "$BUMP after v$latest"
           else
-            VERSION="v0.0.0-dev+${GITHUB_SHA::7}"
+            version="${GITHUB_REF_NAME#v}"
           fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Release version: $VERSION"
+
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Not a version: '$version' (expected something like 1.2.3 or 1.2.3-rc1)"
+            exit 1
+          fi
+          tag="v$version"
+
+          # The cheapest failure there is: a tag that exists already means the
+          # release does too, and finding that out after three builds helps
+          # nobody.
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] \
+              && git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null; then
+            echo "::error::$tag exists already."
+            exit 1
+          fi
+
+          echo "Releasing $tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "### Releasing \`$tag\`" >> "$GITHUB_STEP_SUMMARY"
 
   test:
-    name: Run Test Suite
+    name: Run test suite
     runs-on: windows-latest
     steps:
       - name: Checkout repository
@@ -49,16 +129,37 @@ jobs:
       - name: Run tests
         run: python run_tests.py
 
-  build-windows:
-    name: Build Windows x64 Standalone Package
-    runs-on: windows-latest
+  build:
+    name: Build ${{ matrix.name }}
     needs: [version, test]
+    strategy:
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-latest
+            artifact: windows
+          - name: Linux x64
+            os: ubuntu-latest
+            artifact: linux
+          - name: macOS (Apple Silicon)
+            os: macos-latest
+            artifact: macos
+    runs-on: ${{ matrix.os }}
     env:
-      RELEASE_VERSION: ${{ needs.version.outputs.version }}
-
+      RELEASE_VERSION: ${{ needs.version.outputs.tag }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+
+      - name: Install PortAudio and Tkinter (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y portaudio19-dev python3-tk libasound2-dev libjack-jackd2-dev
+
+      - name: Install PortAudio (macOS)
+        if: runner.os == 'macOS'
+        run: brew install portaudio
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v7
@@ -71,124 +172,102 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: Build Windows executable & zip package
+      # build_release.py names the archive after RELEASE_VERSION and the
+      # platform, so all three agree with the tag.
+      - name: Build the standalone package
         run: python build_release.py
 
-      - name: Upload Windows Build Artifact
+      # Kept with the run as well: after a rehearsal, these are what can be
+      # downloaded and tried.
+      - name: Upload the package
         uses: actions/upload-artifact@v7
         with:
-          name: windows-release-package
-          path: dist/AudioTranscriber-*-windows-x64.zip
+          name: ${{ matrix.artifact }}-release-package
+          path: |
+            dist/AudioTranscriber-*.zip
+            dist/AudioTranscriber-*.tar.gz
+          if-no-files-found: error
 
-  build-linux:
-    name: Build Linux x64 Standalone Package
+  publish:
+    name: Tag and publish
+    needs: [version, build]
+    # A rehearsal is the only reason not to publish; a pushed tag has no
+    # dry_run input to consult.
+    if: github.event_name != 'workflow_dispatch' || !inputs.dry_run
     runs-on: ubuntu-latest
-    needs: [version, test]
+    permissions:
+      contents: write
     env:
-      RELEASE_VERSION: ${{ needs.version.outputs.version }}
-
+      TAG: ${{ needs.version.outputs.tag }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Install Linux system audio dependencies & Tkinter
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y portaudio19-dev python3-tk libasound2-dev libjack-jackd2-dev
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
-
-      - name: Build Linux executable & tar.gz package
-        run: python build_release.py
-
-      - name: Upload Linux Build Artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: linux-release-package
-          path: dist/AudioTranscriber-*-linux-x64.tar.gz
-
-  build-macos:
-    name: Build macOS Standalone Package
-    runs-on: macos-latest
-    needs: [version, test]
-    env:
-      RELEASE_VERSION: ${{ needs.version.outputs.version }}
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-
-      - name: Install PortAudio via Homebrew
-        run: brew install portaudio
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
-
-      - name: Build macOS app bundle & zip package
-        run: python build_release.py
-
-      - name: Upload macOS Build Artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: macos-release-package
-          path: dist/AudioTranscriber-*-macos-*.zip
-
-  publish-release:
-    name: Publish GitHub Release with Multi-Platform Assets
-    needs: [version, build-windows, build-linux, build-macos]
-    if: github.ref_type == 'tag'
-    runs-on: ubuntu-latest
-    env:
-      RELEASE_VERSION: ${{ needs.version.outputs.version }}
-
-    steps:
-      - name: Download all release assets
+      - name: Download the packages
         uses: actions/download-artifact@v8
         with:
           pattern: "*-release-package"
           merge-multiple: true
           path: release-assets/
 
-      - name: List collected assets
-        run: ls -lh release-assets/
+      # Unsigned downloads cannot be vouched for by SmartScreen or Gatekeeper;
+      # a published checksum at least lets anyone verify that the file they got
+      # is byte for byte the one this workflow built.
+      - name: Write checksums
+        working-directory: release-assets
+        run: |
+          sha256sum -- * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
 
-      - name: Create or Update GitHub Release
+      # Set on the commit that was built, not left to the release step, which
+      # would create the tag on whatever the default branch points at by now.
+      # A tag pushed with GITHUB_TOKEN starts no workflow of its own, so the
+      # tag trigger above does not release this version a second time.
+      - name: Push the release tag
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          # "Re-run failed jobs" after a failed publish finds its own tag there
+          # already; the version job, which refuses existing tags, is not run
+          # again then.
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" > /dev/null; then
+            echo "$TAG is on the remote already, from an earlier attempt of this run."
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag -a "$TAG" -m "Sotto $TAG" "$GITHUB_SHA"
+          git push origin "refs/tags/$TAG"
+
+      # Hand-written notes can be put at docs/release-notes/<tag>.md before the
+      # release. Without them, the release says where the downloads are, and
+      # GitHub adds the list of merged pull requests below.
+      - name: Write the release notes
+        run: |
+          notes="docs/release-notes/$TAG.md"
+          if [ -f "$notes" ]; then
+            echo "Using $notes"
+            cp "$notes" release-notes.md
+            exit 0
+          fi
+          cat > release-notes.md <<EOF
+          ## Downloads
+
+          | System | File |
+          | :--- | :--- |
+          | Windows 10/11, x64 | \`AudioTranscriber-$TAG-windows-x64.zip\` |
+          | Linux, x64 | \`AudioTranscriber-$TAG-linux-x64.tar.gz\` |
+          | macOS, Apple Silicon | \`AudioTranscriber-$TAG-macos-arm64.zip\` |
+
+          Extract the archive and start \`AudioTranscriber\`. Recording the system audio on macOS needs a loopback driver such as [BlackHole](https://github.com/ExistentialAudio/BlackHole); on an Intel Mac, run Sotto from source. \`SHA256SUMS.txt\` lists the checksum of every file.
+          EOF
+
+      - name: Publish the release
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ env.TAG }}
+          name: Sotto ${{ env.TAG }}
+          prerelease: ${{ contains(env.TAG, '-') }}
+          body_path: release-notes.md
+          generate_release_notes: true
           files: release-assets/*
-          name: Sotto ${{ env.RELEASE_VERSION }}
-          body: |
-            ## 🚀 Multi-Platform Standalone Release (${{ env.RELEASE_VERSION }})
-
-            ### 💻 Downloads
-            - **Windows (x64)**: `AudioTranscriber-${{ env.RELEASE_VERSION }}-windows-x64.zip`
-            - **Linux (x64)**: `AudioTranscriber-${{ env.RELEASE_VERSION }}-linux-x64.tar.gz`
-            - **macOS (Apple Silicon)**: `AudioTranscriber-${{ env.RELEASE_VERSION }}-macos-arm64.zip`
-
-            ### 📖 Quick Start
-            1. Download the appropriate package for your operating system.
-            2. Extract the archive to any directory.
-            3. Run `AudioTranscriber.exe` (Windows), `./AudioTranscriber` (Linux), or open `AudioTranscriber.app` (macOS).
-
-            > 🍎 **Intel Macs**: this build is Apple Silicon only. Run from source or build locally with `python build_release.py` to get a `macos-x64` archive.
-
-            > 🎧 **macOS Note**: System audio recording on macOS requires a virtual loopback device like [BlackHole](https://github.com/ExistentialAudio/BlackHole) (Free & Open Source).
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          fail_on_unmatched_files: true
