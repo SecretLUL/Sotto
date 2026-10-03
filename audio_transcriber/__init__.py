@@ -1,4 +1,4 @@
-"""Audio AI Recorder & Transcriber.
+"""Sotto: private meeting transcripts, made on your machine.
 
 Package layout:
     paths       - central path resolution (script directory, never cwd)

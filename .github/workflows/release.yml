@@ -173,7 +173,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           files: release-assets/*
-          name: Audio AI Recorder & Transcriber ${{ env.RELEASE_VERSION }}
+          name: Sotto ${{ env.RELEASE_VERSION }}
           body: |
             ## 🚀 Multi-Platform Standalone Release (${{ env.RELEASE_VERSION }})
 

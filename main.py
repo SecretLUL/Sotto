@@ -1,4 +1,4 @@
-"""Entry point of the Audio AI Recorder.
+"""Entry point of Sotto.
 
 Start with:
     pythonw main.py        (no console window)
@@ -59,7 +59,7 @@ def _fatal(message):
         from tkinter import messagebox
         root = tk.Tk()
         root.withdraw()
-        messagebox.showerror("Audio AI Recorder", message)
+        messagebox.showerror("Sotto", message)
         root.destroy()
     except Exception:
         pass
