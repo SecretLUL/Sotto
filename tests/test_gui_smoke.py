@@ -229,5 +229,206 @@ class TestOutputConflictDialog(unittest.TestCase):
         self.assertIsNone(dialog.result)
 
 
+@unittest.skipUnless(_can_open_window(), "no graphical display available")
+class TestControlStates(unittest.TestCase):
+    """Upload must stay blocked from 'Start' until the run is completely over.
+
+    Regression: only upload_and_transcribe() disabled the button, so it stayed
+    live while a recording was being made and, worse, while the finished
+    recording was still being processed. A click then started a second
+    pipeline next to the first, and self.finalizer pointed at only one of them.
+    """
+
+    def setUp(self):
+        from unittest.mock import patch
+        from audio_transcriber import config
+        from audio_transcriber.audio.capture import AudioEngine
+        from audio_transcriber.ui import icons
+        from audio_transcriber.ui.app import RecorderApp
+
+        icons._ICON_CACHE.clear()
+        self.out_dir = tempfile.mkdtemp()
+        settings = config.Settings(output_dir=self.out_dir, live_transcribe=False,
+                                   live_preview=False)
+        self.patches = [
+            # Neither the user's real settings nor real audio streams.
+            patch.object(config, "load", return_value=(settings, [])),
+            patch.object(AudioEngine, "configure", return_value=[]),
+        ]
+        for patcher in self.patches:
+            patcher.start()
+
+        self.root = tk.Tk()
+        self.root.withdraw()
+        self.app = RecorderApp(self.root)
+        self.app._monitor_thread = None
+        self.app.filename_entry.delete(0, tk.END)
+        self.app.filename_entry.insert(0, "ui_state_test")
+
+    def tearDown(self):
+        import shutil
+        from audio_transcriber.ui import icons
+        self.app.on_close()
+        for patcher in self.patches:
+            patcher.stop()
+        icons._ICON_CACHE.clear()
+        shutil.rmtree(self.out_dir, ignore_errors=True)
+
+    def _state(self, button):
+        return str(button["state"])
+
+    def _begin_a_recording(self):
+        """Walk Start through the real code, with the engine itself stubbed."""
+        from unittest.mock import patch
+        self.app.engine.start_recording = lambda name: None
+        with patch.object(self.app, "_current_devices",
+                          return_value=(object(), None, "")):
+            self.app.start_recording()
+
+    def _stop_the_recording(self):
+        from unittest.mock import patch
+        from audio_transcriber.audio.capture import RecordingResult, TrackResult
+        recording = RecordingResult(
+            mic=TrackResult(path="x.raw.wav", rate=16000, frames=16000))
+        self.app.engine.stop_recording = lambda: recording
+        with patch("audio_transcriber.ui.app.pipeline.Finalizer") as finalizer:
+            self.app.stop_recording()
+        return finalizer
+
+    def test_upload_is_blocked_from_start_until_processing_is_done(self):
+        from unittest.mock import patch
+        from audio_transcriber.events import Finished
+
+        self.assertEqual(self._state(self.app.upload_btn), "normal")
+
+        self._begin_a_recording()
+        self.assertEqual(self._state(self.app.upload_btn), "disabled", "recording")
+        self.assertEqual(self._state(self.app.stop_btn), "normal")
+
+        finalizer = self._stop_the_recording()
+        finalizer.return_value.run_async.assert_called_once()
+        self.assertEqual(self._state(self.app.upload_btn), "disabled", "processing")
+        self.assertEqual(self._state(self.app.start_btn), "disabled", "processing")
+
+        with patch("audio_transcriber.ui.app.messagebox"):
+            self.app._on_finished(Finished(text="x", txt_path="x.txt",
+                                           audio_path="x.wav"))
+        self.assertEqual(self._state(self.app.upload_btn), "normal", "done")
+        self.assertEqual(self._state(self.app.start_btn), "normal", "done")
+        self.assertEqual(self._state(self.app.stop_btn), "disabled", "done")
+
+    def test_a_failed_run_releases_upload_too(self):
+        from unittest.mock import patch
+        from audio_transcriber.events import Failed
+
+        self._begin_a_recording()
+        self._stop_the_recording()
+        self.assertEqual(self._state(self.app.upload_btn), "disabled")
+
+        with patch("audio_transcriber.ui.app.messagebox"):
+            self.app._on_failed(Failed(message="boom"))
+        self.assertEqual(self._state(self.app.upload_btn), "normal")
+
+    def test_a_cancelled_overwrite_dialog_releases_both_buttons(self):
+        from unittest.mock import patch
+        with open(os.path.join(self.out_dir, "ui_state_test.wav"), "w") as handle:
+            handle.write("x")                          # makes the name collide
+
+        with patch("audio_transcriber.ui.app.dialogs.ask_output_conflict",
+                   return_value=None) as ask, \
+                patch.object(self.app, "_current_devices",
+                             return_value=(object(), None, "")):
+            self.app.start_recording()
+
+        ask.assert_called_once()
+        self.assertEqual(self._state(self.app.start_btn), "normal")
+        self.assertEqual(self._state(self.app.upload_btn), "normal")
+
+    def test_an_engine_that_refuses_to_start_releases_both_buttons(self):
+        from unittest.mock import patch
+
+        def refuse(_name):
+            raise RuntimeError("Neither audio source is active.")
+
+        self.app.engine.start_recording = refuse
+        with patch("audio_transcriber.ui.app.messagebox") as box, \
+                patch.object(self.app, "_current_devices",
+                             return_value=(object(), None, "")):
+            self.app.start_recording()
+
+        box.showerror.assert_called_once()
+        self.assertEqual(self._state(self.app.start_btn), "normal")
+        self.assertEqual(self._state(self.app.upload_btn), "normal")
+
+    def test_a_direct_upload_call_cannot_slip_past_the_disabled_button(self):
+        from unittest.mock import patch
+        self.app.upload_btn.config(state="disabled")
+        with patch("audio_transcriber.ui.app.filedialog") as dialog:
+            self.app.upload_and_transcribe()
+        dialog.askopenfilename.assert_not_called()
+
+
+@unittest.skipUnless(_can_open_window(), "no graphical display available")
+class TestTranscriptProgressLine(unittest.TestCase):
+    """Download progress is one line that is updated in place.
+
+    Regression: the line had no newline, so whatever was logged next ran on
+    straight after the last percentage ('...20.0 MB/sTranscription started.').
+    """
+
+    def setUp(self):
+        from audio_transcriber.ui import theme, widgets
+        self.root = tk.Tk()
+        self.root.withdraw()
+        theme.apply(self.root)
+        self.transcript = widgets.Transcript(self.root)
+
+    def tearDown(self):
+        self.root.destroy()
+
+    def _content(self):
+        return self.transcript.text.get("1.0", "end-1c")
+
+    def test_updates_in_place_and_the_next_log_starts_a_new_line(self):
+        t = self.transcript
+        t.append("Downloading model 'small'…\n")
+        for percent in ("  5.0", " 50.0", "100.0"):
+            t.replace_last_line(f"small: {percent} %")
+        t.append("Transcription started.\n")
+        self.assertEqual(
+            self._content(),
+            "Downloading model 'small'…\nsmall: 100.0 %\nTranscription started.\n")
+
+    def test_never_overwrites_a_half_written_line(self):
+        t = self.transcript
+        t.append("no newline here")
+        t.replace_last_line("progress 1 %")
+        t.replace_last_line("progress 2 %")
+        self.assertEqual(self._content(), "no newline here\nprogress 2 %")
+
+    def test_two_downloads_in_a_row_keep_their_own_lines(self):
+        t = self.transcript
+        t.replace_last_line("whisper.cpp: 100.0 %")
+        t.append("Extracting archive…\n")
+        t.replace_last_line("model: 10.0 %")
+        self.assertEqual(
+            self._content(),
+            "whisper.cpp: 100.0 %\nExtracting archive…\nmodel: 10.0 %")
+
+    def test_clear_forgets_the_progress_line(self):
+        t = self.transcript
+        t.replace_last_line("model: 10.0 %")
+        t.clear()
+        t.append("fresh\n")
+        self.assertEqual(self._content(), "fresh\n")
+
+    def test_set_transcript_forgets_the_progress_line(self):
+        t = self.transcript
+        t.replace_last_line("model: 10.0 %")
+        t.set_transcript("[00:01] [You]: Hello")
+        t.append("next\n")
+        self.assertEqual(self._content(), "[00:01] [You]: Hello\nnext\n")
+
+
 if __name__ == "__main__":
     unittest.main()

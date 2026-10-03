@@ -92,7 +92,32 @@ def live_transcription_possible(settings):
     return not settings.uses_cloud()
 
 
-class Finalizer:
+class _ScratchFiles:
+    """Temporary files of one run: named without user text, gone when it ends.
+
+    Their names come from paths.scratch_name() - ASCII only, because whisper-cli
+    cannot open a file whose name was typed in Turkish or Arabic - and they are
+    removed when the run ends, whether it succeeded, failed or was cancelled.
+    The files used to be named after the recording and cleaned up on success
+    only (and, with "keep raw tracks", not even then).
+    """
+
+    _scratch = None
+
+    def _scratch_path(self, *labels, suffix=".wav"):
+        path = os.path.join(TMP_DIR, paths.scratch_name(*labels, suffix=suffix))
+        if self._scratch is None:
+            self._scratch = []
+        self._scratch.append(path)
+        return path
+
+    def _remove_scratch(self):
+        for path in self._scratch or ():
+            _try_remove(path)
+        self._scratch = []
+
+
+class Finalizer(_ScratchFiles):
     """Runs the post-processing of a recording in a worker thread."""
 
     def __init__(self, bridge, settings, backend_factory=None, live=None):
@@ -132,6 +157,12 @@ class Finalizer:
 
     # ------------------------------------------------------------------
     def _process(self, recording, base_name):
+        try:
+            self._process_recording(recording, base_name)
+        finally:
+            self._remove_scratch()
+
+    def _process_recording(self, recording, base_name):
         bridge, settings = self.bridge, self.settings
         out_dir = settings.get_output_dir()
         os.makedirs(out_dir, exist_ok=True)
@@ -186,7 +217,7 @@ class Finalizer:
             tail = audio[min(len(audio), int(begin * dsp.TARGET_RATE)):]
             if len(tail) == 0 or dsp.reference_level(tail) <= dsp.SILENCE_FLOOR:
                 continue
-            path = os.path.join(TMP_DIR, f"{base_name}.{kind}.asr.wav")
+            path = self._scratch_path(kind, suffix=".asr.wav")
             # Measured against the whole track, not against the excerpt: a
             # quiet tail normalised on its own comes back as amplified noise.
             sf.write(path, dsp.normalize_for_asr(
@@ -226,7 +257,7 @@ class Finalizer:
             # Single pass over the mixdown (faster, but the attribution has to
             # be estimated again).
             bridge.post(Status("Transcribing mixdown…", "purple"))
-            merged_path = os.path.join(TMP_DIR, f"{base_name}.mixdown.asr.wav")
+            merged_path = self._scratch_path("mixdown", suffix=".asr.wav")
             sf.write(merged_path, dsp.normalize_for_asr((mic + system) * 0.5),
                      dsp.TARGET_RATE, subtype="PCM_16")
             for segment in self._transcribe(merged_path, "mic"):
@@ -251,12 +282,13 @@ class Finalizer:
             handle.write(text + "\n")
 
         # --- 6. Clean up -------------------------------------------------
+        # The normalised copies made for recognition are scratch files and go
+        # in every case (_process removes them, success or not); "keep raw
+        # tracks" is about the recorded originals.
         if not settings.keep_raw_tracks:
             for track in (recording.mic, recording.sys):
                 if track and os.path.exists(track.path):
                     _try_remove(track.path)
-            for path in asr_paths.values():
-                _try_remove(path)
 
         bridge.post(Finished(text=text, txt_path=txt_path, audio_path=mix_path))
 
@@ -521,14 +553,15 @@ class LiveTranscriber:
         # segments end up in the saved transcript.
         self._reference[kind] = max(self._reference[kind], reference)
 
-        path = os.path.join(
-            TMP_DIR, f"{self._base_name}.{kind}.live{self._chunk_index}.wav")
+        # Not named after the recording: see paths.scratch_name().
+        path = os.path.join(TMP_DIR, paths.scratch_name(
+            kind, "live", str(self._chunk_index)))
         self._chunk_index += 1
         os.makedirs(TMP_DIR, exist_ok=True)
-        sf.write(path, dsp.normalize_for_asr(mono,
-                                             reference=self._reference[kind]),
-                 dsp.TARGET_RATE, subtype="PCM_16")
         try:
+            sf.write(path, dsp.normalize_for_asr(mono,
+                                                 reference=self._reference[kind]),
+                     dsp.TARGET_RATE, subtype="PCM_16")
             found = self._backend.transcribe(
                 path, language=self.settings.language, track=kind)
         finally:
@@ -560,7 +593,7 @@ class LiveTranscriber:
 
 
 # ----------------------------------------------------------------------
-class FileFinalizer:
+class FileFinalizer(_ScratchFiles):
     """Runs post-processing and transcription for an uploaded audio file in a worker thread."""
 
     def __init__(self, bridge, settings, backend_factory=None):
@@ -580,7 +613,10 @@ class FileFinalizer:
 
     def run_async(self, file_path, base_name=None):
         if not base_name:
-            base_name = paths.safe_output_name(os.path.splitext(os.path.basename(file_path))[0])
+            # The full file name: safe_output_name() removes the one known
+            # extension itself. Stripping it here as well cut a second,
+            # dot-separated piece off 'Team Meeting 2026.03.10.wav'.
+            base_name = paths.safe_output_name(os.path.basename(file_path))
         thread = threading.Thread(target=self._run, args=(file_path, base_name),
                                   name="file-finalize", daemon=True)
         thread.start()
@@ -595,6 +631,12 @@ class FileFinalizer:
             self.bridge.post_exception("Unexpected error during file processing", exc)
 
     def _process(self, file_path, base_name):
+        try:
+            self._process_file(file_path, base_name)
+        finally:
+            self._remove_scratch()
+
+    def _process_file(self, file_path, base_name):
         bridge, settings = self.bridge, self.settings
         out_dir = settings.get_output_dir()
         os.makedirs(out_dir, exist_ok=True)
@@ -616,7 +658,7 @@ class FileFinalizer:
         bridge.post(Log(f"Audio file loaded: {os.path.basename(mix_path)} ({duration_s:.1f} s)\n"))
 
         # Save normalized WAV into TMP_DIR for ASR
-        asr_path = os.path.join(TMP_DIR, f"{base_name}.file.asr.wav")
+        asr_path = self._scratch_path("file", suffix=".asr.wav")
         sf.write(asr_path, dsp.normalize_for_asr(audio), dsp.TARGET_RATE, subtype="PCM_16")
 
         if self._cancelled.is_set():
@@ -625,8 +667,6 @@ class FileFinalizer:
         bridge.post(Status("Transcribing audio file…", "purple"))
         bridge.post(Log("\n--- Transcription ---\n"))
         segments = self._transcribe(asr_path, "file")
-
-        _try_remove(asr_path)
 
         if self._cancelled.is_set():
             raise TranscriptionError("Processing cancelled.")

@@ -3,8 +3,12 @@
 Skipped when the binary or the model is missing.
 """
 
+import io
 import os
+import shutil
+import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import soundfile as sf
@@ -64,6 +68,45 @@ class TestCommandBuilder(unittest.TestCase):
             WhisperCppBackend("tiny").transcribe("does-not-exist.wav")
 
 
+class TestAnsiSafeArguments(unittest.TestCase):
+    """whisper-cli reads its arguments in the ANSI code page."""
+
+    def test_model_input_and_vad_paths_are_made_safe_the_executable_is_not(self):
+        backend = WhisperCppBackend("tiny", use_vad=True)
+        backend.prepare = lambda progress=None, log=None: (
+            "C:/bin/whisper-cli.exe", "C:/S\u0131rin/model.bin", "C:/S\u0131rin/vad.bin")
+        commands = []
+
+        class FakeProcess:
+            returncode = 0
+
+            def __init__(self):
+                self.stdout = io.StringIO("")
+                self.stderr = io.StringIO("")
+
+            def wait(self, timeout=None):
+                return 0
+
+        def fake_popen(command, **_kwargs):
+            commands.append(command)
+            return FakeProcess()
+
+        with tempfile.TemporaryDirectory() as folder:
+            wav = os.path.join(folder, "input.wav")
+            open(wav, "wb").close()
+            with patch("audio_transcriber.transcribe.whispercpp.subprocess.Popen",
+                       fake_popen), \
+                    patch("audio_transcriber.paths.ansi_safe_path",
+                          lambda path: f"SAFE:{os.path.basename(path)}"):
+                backend.transcribe(wav, language="de", track="mic")
+
+        command = commands[0]
+        self.assertEqual(command[0], "C:/bin/whisper-cli.exe")   # started via the wide API
+        self.assertEqual(command[command.index("-m") + 1], "SAFE:model.bin")
+        self.assertEqual(command[command.index("-f") + 1], "SAFE:input.wav")
+        self.assertEqual(command[command.index("-vm") + 1], "SAFE:vad.bin")
+
+
 @unittest.skipUnless(_have_whisper(), "whisper-cli.exe or ggml-tiny.bin missing")
 class TestRealTranscription(unittest.TestCase):
     @classmethod
@@ -93,6 +136,27 @@ class TestRealTranscription(unittest.TestCase):
         self.assertTrue(any(abs(segment.start - round(segment.start)) > 1e-6
                             for segment in segments),
                         "timestamps were rounded to whole seconds")
+
+    @unittest.skipUnless(os.name == "nt", "ANSI arguments are a Windows matter")
+    def test_input_in_a_non_ansi_folder_with_a_non_ansi_name(self):
+        """Turkish and Arabic names made whisper-cli exit with code 2, 'input
+        file not found' - on a western Windows it only sees the ANSI form."""
+        base = tempfile.mkdtemp()
+        try:
+            folder = os.path.join(base, "Sırin_şirket")
+            os.makedirs(folder)
+            target = os.path.join(
+                folder, "toplantı_اجتماع.wav")
+            sf.write(target, np.random.default_rng(0).normal(0, 0.05, 32000)
+                     .astype("float32"), 16000, subtype="PCM_16")
+            if not paths.ansi_safe_path(target).isascii():
+                self.skipTest("this volume has no 8.3 short names")
+
+            # Raises TranscriptionError ("failed with code 2") without the fix.
+            WhisperCppBackend("tiny", threads=2).transcribe(
+                target, language="de", track="mic")
+        finally:
+            shutil.rmtree(base, ignore_errors=True)
 
     def test_stderr_is_drained_without_deadlock(self):
         """Regression H10: stderr was an unread pipe. If this call completes,
