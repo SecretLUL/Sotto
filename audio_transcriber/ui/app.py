@@ -234,7 +234,7 @@ class RecorderApp:
             p, [choice[0] for choice in config.MODEL_CHOICES]), icon_name="brain")
         model_field.grid(row=0, column=0, sticky="ew", padx=(0, T.MD))
         self.model_combo = model_field.widget
-        self.model_combo.current(self.settings.model_index)
+        self.model_combo.current(config.model_index(self.settings.model))
         self.model_combo.bind("<<ComboboxSelected>>",
                               lambda _e: self._refresh_key_state())
 
@@ -864,7 +864,7 @@ class RecorderApp:
         settings.loop_device = self.sys_combo.get()
         settings.mic_gain_db = round(float(self.mic_gain.get()), 1)
         settings.loop_gain_db = round(float(self.sys_gain.get()), 1)
-        settings.model_index = max(0, self.model_combo.current())
+        settings.model = config.model_key(self.model_combo.current())
         settings.language = config.LANGUAGE_CHOICES[max(0, self.lang_combo.current())][1]
         settings.api_key = self.api_entry.get().strip()
         settings.live_transcribe = bool(self.live_var.get())
@@ -890,7 +890,7 @@ class RecorderApp:
 
     def _refresh_key_state(self):
         """The API key only matters for the cloud backend."""
-        uses_cloud = config.MODEL_CHOICES[max(0, self.model_combo.current())][1] is None
+        uses_cloud = config.model_key(self.model_combo.current()) == config.CLOUD_MODEL
         self.api_entry.config(state="normal" if uses_cloud else "disabled")
         self.show_key_btn.config(state="normal" if uses_cloud else "disabled")
 

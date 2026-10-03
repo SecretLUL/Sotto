@@ -38,7 +38,7 @@ class TestSettingsFile(unittest.TestCase):
         settings = config.Settings(mic_device="20: Microphone",
                                    loop_device="22: Loopback",
                                    mic_gain_db=-8.0, loop_gain_db=10.0,
-                                   model_index=5, language="en",
+                                   model="large-v3-turbo", language="en",
                                    filename="meeting",
                                    output_dir="/custom/output/folder")
         settings.api_key = SAMPLE_KEY
@@ -48,7 +48,7 @@ class TestSettingsFile(unittest.TestCase):
         self.assertEqual(warnings, [])
         self.assertEqual(loaded.mic_device, "20: Microphone")
         self.assertEqual(loaded.mic_gain_db, -8.0)
-        self.assertEqual(loaded.model_index, 5)
+        self.assertEqual(loaded.model, "large-v3-turbo")
         self.assertEqual(loaded.language, "en")
         self.assertEqual(loaded.output_dir, "/custom/output/folder")
         self.assertEqual(loaded.get_output_dir(), os.path.abspath("/custom/output/folder"))
@@ -102,7 +102,7 @@ class TestSettingsFile(unittest.TestCase):
             handle.write("{ this is not json")
         loaded, warnings = config.load(self.path)
         self.assertTrue(warnings)
-        self.assertEqual(loaded.model_index, config.Settings().model_index)
+        self.assertEqual(loaded.model, config.Settings().model)
 
     def test_invalid_single_value_is_ignored(self):
         with open(self.path, "w", encoding="utf-8") as handle:
@@ -111,12 +111,6 @@ class TestSettingsFile(unittest.TestCase):
         self.assertEqual(loaded.filename, "ok")
         self.assertEqual(loaded.mic_gain_db, 0.0)
         self.assertTrue(warnings)
-
-    def test_model_index_is_clamped(self):
-        with open(self.path, "w", encoding="utf-8") as handle:
-            json.dump({"model_index": 99}, handle)
-        loaded, _warnings = config.load(self.path)
-        self.assertEqual(loaded.model_index, len(config.MODEL_CHOICES) - 1)
 
     def test_save_is_atomic(self):
         config.save(config.Settings(), self.path)
@@ -178,25 +172,126 @@ class TestGpuSetting(unittest.TestCase):
 
     def test_it_reaches_both_backends_the_final_pass_and_the_live_ones(self):
         from audio_transcriber import pipeline
-        settings = config.Settings(model_index=3, use_gpu=True)
+        settings = config.Settings(model="small", use_gpu=True)
         self.assertTrue(pipeline.build_backend(settings).allow_gpu)
         self.assertTrue(pipeline.build_backend(settings, greedy=True,
                                                live=True).allow_gpu)
-        self.assertFalse(pipeline.build_backend(config.Settings(model_index=3))
+        self.assertFalse(pipeline.build_backend(config.Settings(model="small"))
                          .allow_gpu)
+
+
+class TestModelStoredByName(unittest.TestCase):
+    """settings.json names the model; it used to hold a position in a list.
+
+    A new entry in the list - or one moved - changed which model every existing
+    settings file meant: "small" turned into "medium" without the user touching
+    anything.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.dir, "settings.json")
+
+    def tearDown(self):
+        for name in os.listdir(self.dir):
+            os.remove(os.path.join(self.dir, name))
+        os.rmdir(self.dir)
+
+    def _write(self, data):
+        with open(self.path, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+
+    def _stored(self):
+        with open(self.path, encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def test_a_whisper_model_is_saved_by_its_name(self):
+        config.save(config.Settings(model="large-v3"), self.path)
+        stored = self._stored()
+        self.assertEqual(stored["model"], "large-v3")
+        self.assertNotIn("model_index", stored)
+        loaded, warnings = config.load(self.path)
+        self.assertEqual((loaded.model, warnings), ("large-v3", []))
+        self.assertEqual(loaded.model_name(), "large-v3")
+
+    def test_the_cloud_entry_is_saved_by_name_too(self):
+        config.save(config.Settings(model=config.CLOUD_MODEL), self.path)
+        loaded, warnings = config.load(self.path)
+        self.assertEqual(warnings, [])
+        self.assertTrue(loaded.uses_cloud())
+        self.assertIsNone(loaded.model_name())
+
+    def test_a_new_entry_in_the_list_does_not_move_the_choice(self):
+        config.save(config.Settings(model="small"), self.path)
+        grown = [("Brand new model", "brand-new")] + list(config.MODEL_CHOICES)
+        with patch.object(config, "MODEL_CHOICES", grown):
+            loaded, warnings = config.load(self.path)
+            self.assertEqual(warnings, [])
+            self.assertEqual(loaded.model_name(), "small")
+            self.assertEqual(config.MODEL_CHOICES[config.model_index(loaded.model)][1],
+                             "small")
+
+    def test_a_file_from_before_this_holds_a_position_and_keeps_its_meaning(self):
+        for index, (_label, name) in enumerate(config.MODEL_CHOICES):
+            with self.subTest(index=index):
+                self._write({"model_index": index})
+                loaded, warnings = config.load(self.path)
+                self.assertEqual(warnings, [])
+                self.assertEqual(loaded.model_name(), name)
+
+    def test_such_a_position_is_clamped_as_it_always_was(self):
+        self._write({"model_index": 99})
+        self.assertEqual(config.load(self.path)[0].model_name(),
+                         config.MODEL_CHOICES[-1][1])
+        self._write({"model_index": -4})
+        self.assertEqual(config.load(self.path)[0].model_name(),
+                         config.MODEL_CHOICES[0][1])
+
+    def test_a_name_wins_over_a_position_when_both_are_there(self):
+        self._write({"model": "tiny", "model_index": 6})
+        self.assertEqual(config.load(self.path)[0].model_name(), "tiny")
+
+    def test_a_position_that_is_not_a_number_is_ignored_with_a_warning(self):
+        self._write({"model_index": "the big one"})
+        loaded, warnings = config.load(self.path)
+        self.assertEqual(loaded.model, config.Settings().model)
+        self.assertTrue(any("model_index" in warning for warning in warnings))
+
+    def test_an_unknown_name_falls_back_to_the_default_and_says_so(self):
+        self._write({"model": "large-v9"})
+        loaded, warnings = config.load(self.path)
+        self.assertEqual(loaded.model, config.Settings().model)
+        self.assertTrue(any("large-v9" in warning for warning in warnings))
+
+    def test_a_settings_object_with_a_bad_name_still_gives_a_usable_model(self):
+        self.assertEqual(config.Settings(model="nonsense").model_name(),
+                         config.Settings().model_name())
+
+    def test_every_entry_of_the_list_round_trips_through_its_stored_name(self):
+        for index, (_label, name) in enumerate(config.MODEL_CHOICES):
+            with self.subTest(entry=name):
+                key = config.model_key(index)
+                self.assertEqual(config.model_index(key), index)
+                self.assertEqual(config.Settings(model=key).model_name(), name)
+
+    def test_out_of_range_positions_for_the_combo_box_stay_in_range(self):
+        self.assertEqual(config.model_key(-1), config.model_key(0))
+        self.assertEqual(config.model_key(999), config.model_key(len(config.MODEL_CHOICES) - 1))
+        self.assertEqual(config.model_index("no such model"),
+                         config.model_index(config.Settings().model))
 
 
 class TestModelSelection(unittest.TestCase):
     def test_cloud_entry(self):
-        settings = config.Settings(model_index=0)
+        settings = config.Settings(model=config.CLOUD_MODEL)
         self.assertTrue(settings.uses_cloud())
         self.assertIsNone(settings.model_name())
 
     def test_live_model_never_exceeds_small(self):
         """Regression H9: the live preview must not start large-v3 on the CPU
         and block every core."""
-        for index in range(len(config.MODEL_CHOICES)):
-            settings = config.Settings(model_index=index)
+        for key in config.model_keys():
+            settings = config.Settings(model=key)
             self.assertIn(settings.live_model_name(), ("tiny", "base", "small"))
 
     def test_thread_count_leaves_headroom(self):

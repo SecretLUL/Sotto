@@ -24,6 +24,34 @@ MODEL_CHOICES = [
     ("large-v3 (3.1 GB - slow, highest accuracy)", "large-v3"),
 ]
 
+# What settings.json holds for the cloud entry; the others are stored under
+# their whisper model name. The file used to hold a position in MODEL_CHOICES,
+# so adding or moving an entry changed which model every saved file meant.
+CLOUD_MODEL = "elevenlabs"
+DEFAULT_MODEL = "small"
+
+
+def model_keys():
+    """The stored name of every entry of MODEL_CHOICES, in list order."""
+    return [name or CLOUD_MODEL for _label, name in MODEL_CHOICES]
+
+
+def model_key(index):
+    """The stored name of the entry at `index` (clamped into the list)."""
+    keys = model_keys()
+    return keys[max(0, min(int(index), len(keys) - 1))]
+
+
+def model_index(key):
+    """Where a stored name sits in MODEL_CHOICES; the default's place if the
+    name is not (or no longer) there."""
+    keys = model_keys()
+    for candidate in (key, DEFAULT_MODEL):
+        if candidate in keys:
+            return keys.index(candidate)
+    return 0
+
+
 LANGUAGE_CHOICES = [
     ("German", "de"), ("English", "en"), ("Detect automatically", "auto"),
     ("Turkish", "tr"), ("French", "fr"), ("Spanish", "es"),
@@ -43,7 +71,7 @@ class Settings:
     loop_gain_db: float = 0.0
 
     # --- AI ---------------------------------------------------------------
-    model_index: int = 3            # default: local 'small'
+    model: str = DEFAULT_MODEL      # a whisper model name or CLOUD_MODEL
     language: str = "de"
     whisper_threads: int = 0        # 0 = automatic
     # Silero VAD: off by default. Measured against a real recording, the VAD
@@ -88,10 +116,9 @@ class Settings:
         return OUT_DIR
 
     def model_name(self):
-
         """whisper model name for the current choice, or None for cloud."""
-        index = max(0, min(self.model_index, len(MODEL_CHOICES) - 1))
-        return MODEL_CHOICES[index][1]
+        key = self.model if self.model in model_keys() else DEFAULT_MODEL
+        return None if key == CLOUD_MODEL else key
 
     def uses_cloud(self):
         return self.model_name() is None
@@ -169,7 +196,7 @@ def load(path=None):
         except (TypeError, ValueError):
             warnings.append(f"Setting '{key}' was invalid and has been ignored.")
 
-    settings.model_index = max(0, min(settings.model_index, len(MODEL_CHOICES) - 1))
+    _read_model(settings, raw, warnings)
     settings.mic_gain_db = max(-40.0, min(40.0, settings.mic_gain_db))
     settings.loop_gain_db = max(-40.0, min(40.0, settings.loop_gain_db))
 
@@ -192,6 +219,19 @@ def load(path=None):
         settings.api_key = secretstore.from_environment()
 
     return settings, warnings
+
+
+def _read_model(settings, raw, warnings):
+    """Settle `settings.model`: a stored name, or the position of older files."""
+    if "model" not in raw and "model_index" in raw:
+        try:
+            settings.model = model_key(raw["model_index"])
+        except (TypeError, ValueError):
+            warnings.append("Setting 'model_index' was invalid and has been ignored.")
+    if settings.model not in model_keys():
+        warnings.append(f"The model '{settings.model}' in settings.json is not "
+                        f"known; using {DEFAULT_MODEL}.")
+        settings.model = DEFAULT_MODEL
 
 
 def save(settings, path=None):

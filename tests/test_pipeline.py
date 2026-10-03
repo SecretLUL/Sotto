@@ -79,7 +79,7 @@ class TestFinalizer(unittest.TestCase):
         self._orig_tmp = pipeline.TMP_DIR
         pipeline.TMP_DIR = self.tmp
 
-        self.settings = config.Settings(model_index=3, mic_gain_db=-8.0,
+        self.settings = config.Settings(model="small", mic_gain_db=-8.0,
                                         loop_gain_db=10.0, language="en",
                                         keep_raw_tracks=False,
                                         output_dir=self.out)
@@ -168,7 +168,7 @@ class TestFinalizer(unittest.TestCase):
     def test_cloud_backend_is_reached_when_selected(self):
         """Regression K1: with the live preview enabled the cloud path was
         unreachable in the previous version."""
-        self.settings.model_index = 0            # ElevenLabs
+        self.settings.model = config.CLOUD_MODEL      # ElevenLabs
         self.settings.live_transcribe = True
         used = []
 
