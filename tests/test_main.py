@@ -29,6 +29,8 @@ SCRIPT = textwrap.dedent("""
 
     patchers = [
         patch("tkinter.Tk", side_effect=lambda: order.append("Tk") or FakeRoot()),
+        patch("audio_transcriber.ui.chrome.dark_title_bar",
+              side_effect=lambda root: order.append("dark_title_bar")),
         patch("audio_transcriber.ui.app.RecorderApp",
               side_effect=lambda root: order.append("RecorderApp") or FakeApp()),
         patch("audio_transcriber.paths.migrate_legacy_data",
@@ -53,9 +55,11 @@ class TestEntryPoint(unittest.TestCase):
         result = subprocess.run([sys.executable, "-c", SCRIPT], cwd=ROOT,
                                 capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
+        # The title bar is arranged before anything is built into the window,
+        # which keeps it invisible until its frame is dark (ui/chrome.py).
         self.assertEqual(
             result.stdout.strip(),
-            "0 migrate,Tk,RecorderApp,after,offer_recovery,mainloop")
+            "0 migrate,Tk,dark_title_bar,RecorderApp,after,offer_recovery,mainloop")
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ Every colour and spacing value lives here - no colour literals are allowed
 anywhere else in the UI code.
 """
 
+import math
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk
@@ -16,13 +17,13 @@ from tkinter import ttk
 # ----------------------------------------------------------------------
 # Colours
 # ----------------------------------------------------------------------
-BG = "#121418"            # window background
-BG_DEEP = "#0a0c0e"       # deep background, input fields
-CARD = "#1b1e26"          # card surface
-CARD_HI = "#242834"       # card under the pointer
-FIELD = "#14171f"         # input field background
-BORDER = "#2a2f3d"        # card border
-BORDER_HI = "#3e4659"     # border on focus/hover
+BG = "#101319"            # window background - also the title bar (chrome.py)
+BG_DEEP = "#0a0c10"       # deep background, input fields
+CARD = "#181c25"          # card surface
+CARD_HI = "#20252f"       # card under the pointer, selected tab
+FIELD = "#0f1218"         # input field background
+BORDER = "#272d3a"        # card border
+BORDER_HI = "#3a4356"     # border on focus/hover
 
 TEXT = "#f1f5f9"          # body text
 TEXT_DIM = "#94a3b8"      # labels
@@ -31,11 +32,19 @@ TEXT_MUTE = "#64748b"     # hints, footnotes
 ACCENT = "#38bdf8"        # primary cyan/sky blue
 ACCENT_HI = "#7dd3fc"
 ACCENT_LO = "#0284c7"
+ON_ACCENT = "#04131d"     # text on an accent surface
 REC = "#f43f5e"           # recording crimson
 REC_HI = "#fb7185"
+REC_TINT = "#2a141b"      # a surface that belongs to a running recording
 OK = "#10b981"            # success emerald
 WARN = "#f59e0b"          # warning amber
 DANGER = "#f43f5e"
+
+# The two voices, as in the logo and the transcript: your own, and everyone
+# else's. The microphone's controls are drawn in the one, the system audio's
+# in the other.
+YOU = "#38bdf8"
+OTHERS = "#34d399"
 
 # Level meter
 METER_LOW = "#10b981"
@@ -44,11 +53,11 @@ METER_HIGH = "#f43f5e"
 METER_OFF_LOW = "#142922"
 METER_OFF_MID = "#2e2110"
 METER_OFF_HIGH = "#33161c"
-METER_BG = "#0a0c0e"
+METER_BG = "#0a0c10"
 
 # Speaker colours in the transcript
-SPEAKER_SELF = "#38bdf8"
-SPEAKER_OTHER = "#34d399"
+SPEAKER_SELF = YOU
+SPEAKER_OTHER = OTHERS
 TIMESTAMP = "#64748b"
 
 # ----------------------------------------------------------------------
@@ -120,7 +129,9 @@ def apply(root):
     fonts.update({
         "display": tkfont.Font(root=root, family=display, size=20, weight="bold"),
         "title": tkfont.Font(root=root, family=family, size=13, weight="bold"),
+        "card_title": tkfont.Font(root=root, family=family, size=11, weight="bold"),
         "section": tkfont.Font(root=root, family=family, size=10, weight="bold"),
+        "timer": tkfont.Font(root=root, family=mono, size=18, weight="bold"),
         "body": tkfont.Font(root=root, family=family, size=11),
         "body_bold": tkfont.Font(root=root, family=family, size=11, weight="bold"),
         "small": tkfont.Font(root=root, family=family, size=10),
@@ -147,6 +158,10 @@ def apply(root):
                     font=fonts["tiny"])
 
     # --- Combo box -----------------------------------------------------
+    # clam draws the arrow as a button of its own, framed and grey, beside
+    # the field. Here a chevron sits inside the field instead; a read-only
+    # combo box opens wherever it is clicked anyway.
+    _chevron_element(root, style)
     for name in ("TCombobox", "Dark.TCombobox"):
         style.configure(name,
                         fieldbackground=FIELD, background=FIELD, foreground=TEXT,
@@ -164,6 +179,10 @@ def apply(root):
                   lightcolor=[("focus", ACCENT), ("hover", BORDER_HI)],
                   darkcolor=[("focus", ACCENT), ("hover", BORDER_HI)],
                   arrowcolor=[("disabled", TEXT_MUTE), ("hover", TEXT)])
+        style.layout(name, [("Combobox.field", {"sticky": "nswe", "children": [
+            ("Sotto.chevron", {"side": "right", "sticky": ""}),
+            ("Combobox.padding", {"expand": "1", "sticky": "nswe", "children": [
+                ("Combobox.textarea", {"sticky": "nswe"})]})]})])
 
     # Drop-down list (a classic Tk listbox, only reachable via the option DB)
     root.option_add("*TCombobox*Listbox.background", CARD)
@@ -201,38 +220,28 @@ def apply(root):
         ("Vertical.Scrollbar.trough", {"sticky": "ns", "children": [
             ("Vertical.Scrollbar.thumb", {"expand": 1, "sticky": "nswe"})]})])
 
-    # --- Notebook (Tabs) -----------------------------------------------
-    style.configure("TNotebook", background=BG, borderwidth=0,
-                    tabmargins=[0, 0, 0, px(8)])
-    style.configure("TNotebook.Tab", background=CARD, foreground=TEXT_DIM,
-                    padding=(px(22), px(11)), font=fonts["button"], borderwidth=0,
-                    focuscolor="", lightcolor=BORDER, darkcolor=BORDER)
-
-    style.map("TNotebook.Tab",
-              background=[("selected", CARD_HI), ("active", BORDER)],
-              foreground=[("selected", ACCENT), ("active", TEXT)],
-              focuscolor=[("selected", ""), ("active", ""), ("focus", "")],
-              lightcolor=[("selected", ACCENT)],
-              darkcolor=[("selected", ACCENT)])
-
-    style.layout("TNotebook.Tab", [
-        ("Notebook.tab", {
-            "sticky": "nswe",
-            "children": [
-                ("Notebook.padding", {
-                    "side": "top",
-                    "sticky": "nswe",
-                    "children": [
-                        ("Notebook.label", {"side": "top", "sticky": ""})
-                    ]
-                })
-            ]
-        })
-    ])
-
     return style
 
 
+def _chevron_element(root, style):
+    """The image element 'Sotto.chevron', made once per Tk interpreter.
+
+    The images belong to `root` itself, not to icons' cache, which serves
+    whichever Tk was created first; and they are kept on it, because ttk only
+    holds their names.
+    """
+    from . import icons                  # Pillow only: no theme import back
+
+    if getattr(root, "_sotto_chevron", None):
+        return
+    images = [tk.PhotoImage(master=root, data=icons.png("chevron_down", px(16), colour))
+              for colour in (TEXT_DIM, TEXT_MUTE)]
+    try:
+        style.element_create("Sotto.chevron", "image", images[0],
+                             ("disabled", images[1]), padding=(px(2), 0, px(10), 0))
+    except tk.TclError:                  # this interpreter has it already
+        pass
+    root._sotto_chevron = images
 
 
 # ----------------------------------------------------------------------
@@ -241,7 +250,13 @@ def round_rect(canvas, x0, y0, x1, y1, radius, **kwargs):
 
     Tk has no rounded rectangles; a polygon with smooth=True and duplicated
     corner points produces the result without any library.
+
+    The corners go to whole pixels. Tk rounds the points of the smoothed
+    outline, and on an edge at x.5 the tiny errors of the spline rounded some
+    stretches one way and some the other: short dashes a pixel off the edge,
+    the light marks under every card.
     """
+    x0, y0, x1, y1 = (math.floor(value) for value in (x0, y0, x1, y1))
     radius = max(0, min(radius, (x1 - x0) / 2, (y1 - y0) / 2))
     points = [
         x0 + radius, y0, x1 - radius, y0, x1, y0,

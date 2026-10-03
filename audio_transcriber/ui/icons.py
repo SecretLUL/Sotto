@@ -1,8 +1,12 @@
-"""SVG and high-resolution vector icon renderer for the Tkinter interface.
+"""Vector icons for the Tkinter interface, drawn with Pillow.
 
-Renders crisp, multi-color anti-aliased vector icons at any target DPI/size
-without requiring third-party SVG C-libraries. Uses Pillow for 4x supersampled
-anti-aliasing and converts to native tk.PhotoImage objects.
+One line style for all of them - round-capped strokes on a 24 x 24 grid, the
+way line icons are usually drawn - in a single colour that the caller chooses
+(fg), so a tab, a button or a source row can tint them to their state. The
+only exception is Sotto's mark, which has its own colours.
+
+Rendered at four times the size and scaled down with Lanczos for clean edges,
+then converted to tk.PhotoImage.
 """
 
 import io
@@ -12,6 +16,8 @@ from PIL import Image, ImageDraw
 
 _ICON_CACHE = {}
 
+DEFAULT_COLOUR = "#94a3b8"        # theme.TEXT_DIM
+
 
 def get_icon(name: str, size: int = 24, fg: str = None) -> tk.PhotoImage:
     """Get a tk.PhotoImage for the given icon name and size (cached)."""
@@ -19,12 +25,16 @@ def get_icon(name: str, size: int = 24, fg: str = None) -> tk.PhotoImage:
     if cache_key in _ICON_CACHE:
         return _ICON_CACHE[cache_key]
 
-    img = render_icon_image(name, size, fg=fg)
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    photo = tk.PhotoImage(data=buf.getvalue())
+    photo = tk.PhotoImage(data=png(name, size, fg=fg))
     _ICON_CACHE[cache_key] = photo
     return photo
+
+
+def png(name: str, size: int = 24, fg: str = None) -> bytes:
+    """The icon as PNG data, for a PhotoImage of a particular Tk (not cached)."""
+    buf = io.BytesIO()
+    render_icon_image(name, size, fg=fg).save(buf, format="PNG")
+    return buf.getvalue()
 
 
 def render_icon_image(name: str, size: int = 24, fg: str = None) -> Image.Image:
@@ -42,229 +52,164 @@ def render_icon_image(name: str, size: int = 24, fg: str = None) -> Image.Image:
 
 
 # ======================================================================
-# Icon Renderers (Canvas coordinate range: 0 .. S)
+# Drawing on the 24 x 24 grid
+# ======================================================================
+class _Pen:
+    """Round-capped strokes and plain fills in grid units (0 .. 24)."""
+
+    def __init__(self, draw, S, colour=None, weight=2.0):
+        self.draw = draw
+        self.k = S / 24.0
+        self.colour = colour or DEFAULT_COLOUR
+        self.w = weight * self.k
+
+    def _xy(self, x, y):
+        return x * self.k, y * self.k
+
+    def _width(self):
+        return max(1, round(self.w))
+
+    def _dot(self, x, y, radius):
+        self.draw.ellipse([x - radius, y - radius, x + radius, y + radius],
+                          fill=self.colour)
+
+    def line(self, *coords, closed=False):
+        """A polyline through (x, y) pairs, round at its ends and joints."""
+        points = [self._xy(coords[i], coords[i + 1]) for i in range(0, len(coords), 2)]
+        if closed:
+            points.append(points[0])
+        self.draw.line(points, fill=self.colour, width=self._width(), joint="curve")
+        for x, y in (points[0], points[-1]):
+            self._dot(x, y, self.w / 2)
+
+    def arc(self, cx, cy, r, start, end):
+        """Degrees from three o'clock, clockwise - as in ImageDraw.arc()."""
+        x, y = self._xy(cx, cy)
+        radius, half = r * self.k, self.w / 2
+        self.draw.arc([x - radius - half, y - radius - half,
+                       x + radius + half, y + radius + half],
+                      start, end, fill=self.colour, width=self._width())
+        for angle in (start, end):
+            a = math.radians(angle)
+            self._dot(x + radius * math.cos(a), y + radius * math.sin(a), half)
+
+    def rect(self, x0, y0, x1, y1, radius):
+        """The outline of a rounded rectangle, the stroke centred on its edge."""
+        half = self.w / 2
+        (a, b), (c, d) = self._xy(x0, y0), self._xy(x1, y1)
+        self.draw.rounded_rectangle([a - half, b - half, c + half, d + half],
+                                    radius=radius * self.k + half,
+                                    outline=self.colour, width=self._width())
+
+    def ellipse(self, cx, cy, rx, ry):
+        half = self.w / 2
+        x, y = self._xy(cx, cy)
+        self.draw.ellipse([x - rx * self.k - half, y - ry * self.k - half,
+                           x + rx * self.k + half, y + ry * self.k + half],
+                          outline=self.colour, width=self._width())
+
+    def circle(self, cx, cy, r):
+        self.ellipse(cx, cy, r, r)
+
+    def disc(self, cx, cy, r):
+        x, y = self._xy(cx, cy)
+        self._dot(x, y, r * self.k)
+
+    def block(self, x0, y0, x1, y1, radius):
+        """A filled rounded rectangle."""
+        (a, b), (c, d) = self._xy(x0, y0), self._xy(x1, y1)
+        self.draw.rounded_rectangle([a, b, c, d], radius=radius * self.k,
+                                    fill=self.colour)
+
+    def erase(self, x0, y0, x1, y1, radius=0):
+        """Clear an area again, to let one shape pass behind another."""
+        (a, b), (c, d) = self._xy(x0, y0), self._xy(x1, y1)
+        self.draw.rounded_rectangle([a, b, c, d], radius=radius * self.k,
+                                    fill=(0, 0, 0, 0))
+
+    def star(self, cx, cy, r_out, r_in):
+        """A filled four-pointed star."""
+        points = []
+        for i in range(8):
+            a = i * math.pi / 4 - math.pi / 2
+            r = r_out if i % 2 == 0 else r_in
+            points.append(self._xy(cx + r * math.cos(a), cy + r * math.sin(a)))
+        self.draw.polygon(points, fill=self.colour)
+
+
+# ======================================================================
+# The icons
 # ======================================================================
 def _draw_microphone(draw: ImageDraw.ImageDraw, S: float, fg: str = None):
-    """Vibrant Microphone Icon with Cyan/Blue gradient capsule & stand."""
-    cx = S * 0.5
-    
-    # Outer subtle rounded badge background
-    pad = S * 0.05
-    draw.rounded_rectangle(
-        [pad, pad, S - pad, S - pad],
-        radius=S * 0.25,
-        fill="#0f172a",
-        outline="#1e293b",
-        width=int(S * 0.04)
-    )
-
-    # Mic Capsule Body
-    mic_w = S * 0.26
-    mic_h = S * 0.42
-    mic_top = S * 0.18
-    draw.rounded_rectangle(
-        [cx - mic_w / 2, mic_top, cx + mic_w / 2, mic_top + mic_h],
-        radius=mic_w / 2,
-        fill=fg or "#38bdf8",
-        outline="#0284c7",
-        width=int(S * 0.03)
-    )
-
-    # Grille accent lines
-    draw.line([cx - mic_w * 0.35, mic_top + mic_h * 0.35, cx + mic_w * 0.35, mic_top + mic_h * 0.35],
-              fill="#0284c7", width=int(S * 0.03))
-    draw.line([cx - mic_w * 0.35, mic_top + mic_h * 0.65, cx + mic_w * 0.35, mic_top + mic_h * 0.65],
-              fill="#0284c7", width=int(S * 0.03))
-
-    # Arc bracket around capsule
-    arc_w = S * 0.48
-    arc_top = S * 0.28
-    arc_bottom = S * 0.68
-    draw.arc(
-        [cx - arc_w / 2, arc_top, cx + arc_w / 2, arc_bottom],
-        start=0,
-        end=180,
-        fill="#38bdf8",
-        width=int(S * 0.06)
-    )
-
-    # Stem and Base Stand
-    stem_top = arc_bottom - (arc_bottom - arc_top) / 2
-    stem_bottom = S * 0.82
-    draw.line([cx, stem_top, cx, stem_bottom], fill="#38bdf8", width=int(S * 0.06))
-
-    base_w = S * 0.44
-    draw.line([cx - base_w / 2, stem_bottom, cx + base_w / 2, stem_bottom],
-              fill="#38bdf8", width=int(S * 0.07))
+    pen = _Pen(draw, S, fg)
+    pen.rect(9, 2.5, 15, 14.5, 3)
+    pen.arc(12, 11.5, 7, 0, 180)
+    pen.line(12, 18.5, 12, 21.5)
 
 
 def _draw_speaker(draw: ImageDraw.ImageDraw, S: float, fg: str = None):
-    """Vibrant Speaker / Playback Icon with sound waves."""
-    # Outer subtle rounded badge background
-    pad = S * 0.05
-    draw.rounded_rectangle(
-        [pad, pad, S - pad, S - pad],
-        radius=S * 0.25,
-        fill="#0f172a",
-        outline="#1e293b",
-        width=int(S * 0.04)
-    )
-
-    # Speaker Body (Cone)
-    spk_color = fg or "#a855f7"
-    cx_left = S * 0.22
-    cy = S * 0.5
-
-    # Speaker box
-    draw.rounded_rectangle(
-        [cx_left, cy - S * 0.14, cx_left + S * 0.14, cy + S * 0.14],
-        radius=S * 0.04,
-        fill=spk_color
-    )
-
-    # Speaker flare polygon
-    flare_points = [
-        (cx_left + S * 0.12, cy - S * 0.14),
-        (cx_left + S * 0.32, cy - S * 0.30),
-        (cx_left + S * 0.32, cy + S * 0.30),
-        (cx_left + S * 0.12, cy + S * 0.14)
-    ]
-    draw.polygon(flare_points, fill=spk_color)
-
-    # Sound Waves
-    wave_color = "#c084fc"
-    # Wave 1 (inner)
-    draw.arc(
-        [S * 0.42, cy - S * 0.20, S * 0.62, cy + S * 0.20],
-        start=-60, end=60, fill=wave_color, width=int(S * 0.06)
-    )
-    # Wave 2 (outer)
-    draw.arc(
-        [S * 0.52, cy - S * 0.34, S * 0.82, cy + S * 0.34],
-        start=-60, end=60, fill="#e879f9", width=int(S * 0.06)
-    )
+    pen = _Pen(draw, S, fg)
+    pen.line(3.5, 9.5, 7.5, 9.5, 12.5, 5, 12.5, 19, 7.5, 14.5, 3.5, 14.5, closed=True)
+    pen.arc(13, 12, 4, -45, 45)
+    pen.arc(13, 12, 8, -48, 48)
 
 
 def _draw_sparkle(draw: ImageDraw.ImageDraw, S: float, fg: str = None):
-    """Vibrant Gold/Amber AI Sparkle Icon for ElevenLabs Scribe."""
-    def draw_star(cx, cy, r_out, r_in, fill_col):
-        pts = []
-        for i in range(8):
-            angle = i * (math.pi / 4) - math.pi / 2
-            r = r_out if i % 2 == 0 else r_in
-            pts.append((cx + r * math.cos(angle), cy + r * math.sin(angle)))
-        draw.polygon(pts, fill=fill_col)
-
-    # Main Center Star
-    draw_star(S * 0.5, S * 0.48, S * 0.38, S * 0.12, fg or "#fbbf24")
-    # Small Top Right Star
-    draw_star(S * 0.78, S * 0.24, S * 0.18, S * 0.06, "#fef08a")
-    # Small Bottom Left Star
-    draw_star(S * 0.24, S * 0.76, S * 0.14, S * 0.05, "#fde047")
+    pen = _Pen(draw, S, fg)
+    pen.star(10.5, 13, 8, 2.4)
+    pen.star(18.5, 5.5, 3.6, 1.1)
 
 
 def _draw_record(draw: ImageDraw.ImageDraw, S: float, fg: str = None):
-    """Vibrant Recording Pulse Circle Icon."""
-    cx, cy = S * 0.5, S * 0.5
-    r_outer = S * 0.42
-    r_inner = S * 0.26
-
-    # Outer subtle halo
-    draw.ellipse([cx - r_outer, cy - r_outer, cx + r_outer, cy + r_outer],
-                 fill="#ff475733", outline="#ff475766", width=int(S * 0.04))
-    # Core Red Record Dot
-    draw.ellipse([cx - r_inner, cy - r_inner, cx + r_inner, cy + r_inner],
-                 fill=fg or "#ff4757", outline="#ffffff", width=int(S * 0.04))
+    _Pen(draw, S, fg or "#f43f5e").disc(12, 12, 6)
 
 
 def _draw_stop(draw: ImageDraw.ImageDraw, S: float, fg: str = None):
-    """Stop Recording Square Icon."""
-    pad = S * 0.24
-    draw.rounded_rectangle(
-        [pad, pad, S - pad, S - pad],
-        radius=S * 0.08,
-        fill=fg or "#e11d48",
-        outline="#ffffff",
-        width=int(S * 0.04)
-    )
+    _Pen(draw, S, fg or "#f43f5e").block(6.5, 6.5, 17.5, 17.5, 2.5)
 
 
 def _draw_globe(draw: ImageDraw.ImageDraw, S: float, fg: str = None):
-    """Globe / Language Icon."""
-    cx, cy = S * 0.5, S * 0.5
-    r = S * 0.38
-    color = fg or "#38bdf8"
-    draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=color, width=int(S * 0.06))
-    draw.line([cx - r, cy, cx + r, cy], fill=color, width=int(S * 0.05))
-    draw.ellipse([cx - r * 0.5, cy - r, cx + r * 0.5, cy + r], outline=color, width=int(S * 0.05))
+    pen = _Pen(draw, S, fg)
+    pen.circle(12, 12, 9)
+    pen.ellipse(12, 12, 4, 9)
+    pen.line(3, 12, 21, 12)
 
 
 def _draw_brain(draw: ImageDraw.ImageDraw, S: float, fg: str = None):
-    """AI Model / Brain / Neural CPU Icon."""
-    cx, cy = S * 0.5, S * 0.5
-    color = fg or "#818cf8"
-    
-    # Outer chip / frame
-    r = S * 0.34
-    draw.rounded_rectangle([cx - r, cy - r, cx + r, cy + r], radius=S * 0.12,
-                           fill="#1e1b4b", outline=color, width=int(S * 0.06))
-    
-    # Inner neural nodes
-    draw.ellipse([cx - S * 0.18, cy - S * 0.18, cx - S * 0.04, cy - S * 0.04], fill="#a5b4fc")
-    draw.ellipse([cx + S * 0.04, cy - S * 0.18, cx + S * 0.18, cy - S * 0.04], fill="#a5b4fc")
-    draw.ellipse([cx - S * 0.07, cy + S * 0.04, cx + S * 0.07, cy + S * 0.18], fill="#c7d2fe")
-
-    # Connectors
-    draw.line([cx - S * 0.11, cy - S * 0.11, cx, cy + S * 0.11], fill="#818cf8", width=int(S * 0.04))
-    draw.line([cx + S * 0.11, cy - S * 0.11, cx, cy + S * 0.11], fill="#818cf8", width=int(S * 0.04))
+    """The model: a chip."""
+    pen = _Pen(draw, S, fg)
+    pen.rect(6, 6, 18, 18, 2.5)
+    pen.block(9.5, 9.5, 14.5, 14.5, 1)
+    for at in (10, 14):
+        pen.line(at, 2.5, at, 6)
+        pen.line(at, 18, at, 21.5)
+        pen.line(2.5, at, 6, at)
+        pen.line(18, at, 21.5, at)
 
 
 def _draw_lock(draw: ImageDraw.ImageDraw, S: float, fg: str = None):
-    """Security Lock Icon for API Key."""
-    cx = S * 0.5
-    color = fg or "#fbbf24"
+    pen = _Pen(draw, S, fg)
+    pen.rect(5, 11, 19, 21, 2.5)
+    pen.line(8, 11, 8, 7.5)
+    pen.arc(12, 7.5, 4, 180, 360)
+    pen.line(16, 7.5, 16, 11)
 
-    # Shackle (top arc)
-    shackle_w = S * 0.32
-    top = S * 0.18
-    draw.arc([cx - shackle_w / 2, top, cx + shackle_w / 2, top + S * 0.38],
-             start=180, end=360, fill=color, width=int(S * 0.07))
 
-    # Lock Body
-    body_top = S * 0.44
-    body_w = S * 0.48
-    body_h = S * 0.38
-    draw.rounded_rectangle(
-        [cx - body_w / 2, body_top, cx + body_w / 2, body_top + body_h],
-        radius=S * 0.08,
-        fill=color,
-        outline="#b45309",
-        width=int(S * 0.03)
-    )
-
-    # Keyhole
-    draw.ellipse([cx - S * 0.06, body_top + S * 0.10, cx + S * 0.06, body_top + S * 0.22],
-                 fill="#78350f")
+def _eye(pen):
+    # The lid: two arcs through (2, 12) and (22, 12), 7 units apart at the middle.
+    pen.arc(12, 15.64, 10.64, 200, 340)
+    pen.arc(12, 8.36, 10.64, 20, 160)
+    pen.circle(12, 12, 3)
 
 
 def _draw_eye(draw: ImageDraw.ImageDraw, S: float, fg: str = None):
-    """Eye Icon for Show Password."""
-    cx, cy = S * 0.5, S * 0.5
-    color = fg or "#94a3b8"
-
-    # Eye outline
-    draw.arc([cx - S * 0.40, cy - S * 0.28, cx + S * 0.40, cy + S * 0.28],
-             start=0, end=360, fill=color, width=int(S * 0.06))
-    # Pupil
-    draw.ellipse([cx - S * 0.14, cy - S * 0.14, cx + S * 0.14, cy + S * 0.14],
-                 fill=color)
+    _eye(_Pen(draw, S, fg))
 
 
 def _draw_eye_off(draw: ImageDraw.ImageDraw, S: float, fg: str = None):
-    """Eye Off Icon for Hide Password."""
-    _draw_eye(draw, S, fg)
-    color = fg or "#f43f5e"
-    draw.line([S * 0.15, S * 0.85, S * 0.85, S * 0.15], fill=color, width=int(S * 0.08))
+    pen = _Pen(draw, S, fg)
+    _eye(pen)
+    pen.line(4, 4, 20, 20)
 
 
 def _draw_app_logo(draw: ImageDraw.ImageDraw, S: float, fg: str = None):
@@ -304,141 +249,90 @@ def _draw_app_logo(draw: ImageDraw.ImageDraw, S: float, fg: str = None):
 
 
 def _draw_transcript(draw: ImageDraw.ImageDraw, S: float, fg: str = None):
-    """Transcript Document & Text Icon."""
-    pad_x = S * 0.20
-    pad_y = S * 0.15
-    color = fg or "#a78bfa"
-
-    # Document Page
-    draw.rounded_rectangle(
-        [pad_x, pad_y, S - pad_x, S - pad_y],
-        radius=S * 0.08,
-        fill="#2e1065",
-        outline=color,
-        width=int(S * 0.05)
-    )
-
-    # Text Lines
-    line_x0 = pad_x + S * 0.10
-    line_x1 = S - pad_x - S * 0.10
-    for y_rel in [0.32, 0.48, 0.64]:
-        draw.line([line_x0, S * y_rel, line_x1, S * y_rel],
-                  fill="#c4b5fd", width=int(S * 0.05))
+    pen = _Pen(draw, S, fg)
+    pen.rect(5, 2.5, 19, 21.5, 2.5)
+    pen.line(8.5, 8, 15.5, 8)
+    pen.line(8.5, 12, 15.5, 12)
+    pen.line(8.5, 16, 12.5, 16)
 
 
 def _draw_copy(draw: ImageDraw.ImageDraw, S: float, fg: str = None):
-    """Clipboard / Copy Icon."""
-    color = fg or "#94a3b8"
-    # Back sheet
-    draw.rounded_rectangle([S * 0.30, S * 0.30, S * 0.80, S * 0.85],
-                           radius=S * 0.06, fill=None, outline=color, width=int(S * 0.05))
-    # Front sheet
-    draw.rounded_rectangle([S * 0.18, S * 0.15, S * 0.68, S * 0.70],
-                           radius=S * 0.06, fill="#1e293b", outline="#38bdf8", width=int(S * 0.05))
+    pen = _Pen(draw, S, fg)
+    pen.rect(3.5, 3.5, 14.5, 14.5, 2.5)
+    pen.erase(7.5, 7.5, 22, 22, 3.5)
+    pen.rect(9.5, 9.5, 20.5, 20.5, 2.5)
 
 
 def _draw_trash(draw: ImageDraw.ImageDraw, S: float, fg: str = None):
-    """Trash / Clear Icon."""
-    color = fg or "#f43f5e"
-    # Bin body
-    draw.rounded_rectangle([S * 0.25, S * 0.35, S * 0.75, S * 0.85],
-                           radius=S * 0.06, fill="#4c0519", outline=color, width=int(S * 0.05))
-    # Lid
-    draw.line([S * 0.18, S * 0.30, S * 0.82, S * 0.30], fill=color, width=int(S * 0.06))
-    draw.line([S * 0.38, S * 0.22, S * 0.62, S * 0.22], fill=color, width=int(S * 0.06))
+    pen = _Pen(draw, S, fg)
+    pen.line(3.5, 6.5, 20.5, 6.5)
+    pen.line(9, 6.5, 9, 4, 15, 4, 15, 6.5)
+    pen.line(5.5, 6.5, 6.5, 20.5, 17.5, 20.5, 18.5, 6.5)
+    pen.line(10, 10.5, 10, 16.5)
+    pen.line(14, 10.5, 14, 16.5)
 
 
 def _draw_warning(draw: ImageDraw.ImageDraw, S: float, fg: str = None):
-    """Warning Triangle Icon."""
-    color = fg or "#f59e0b"
-    cx = S * 0.5
-    top = (cx, S * 0.15)
-    bottom_left = (S * 0.12, S * 0.85)
-    bottom_right = (S * 0.88, S * 0.85)
-
-    draw.polygon([top, bottom_right, bottom_left], fill="#451a03", outline=color, width=int(S * 0.05))
-    # Exclamation mark
-    draw.line([cx, S * 0.38, cx, S * 0.60], fill=color, width=int(S * 0.07))
-    draw.ellipse([cx - S * 0.04, S * 0.70, cx + S * 0.04, S * 0.78], fill=color)
+    pen = _Pen(draw, S, fg or "#f59e0b")
+    pen.line(12, 3.5, 21.5, 20, 2.5, 20, closed=True)
+    pen.line(12, 9.5, 12, 13.5)
+    pen.disc(12, 16.8, 1.3)
 
 
 def _draw_check(draw: ImageDraw.ImageDraw, S: float, fg: str = None):
-    """Success Checkmark Icon."""
-    color = fg or "#10b981"
-    draw.ellipse([S * 0.12, S * 0.12, S * 0.88, S * 0.88], fill="#064e3b", outline=color, width=int(S * 0.05))
-    pts = [(S * 0.28, S * 0.50), (S * 0.44, S * 0.66), (S * 0.72, S * 0.34)]
-    draw.line(pts, fill=color, width=int(S * 0.07))
+    _Pen(draw, S, fg or "#10b981").line(4.5, 12.5, 9.5, 17.5, 19.5, 6.5)
+
+
+def _tray(pen):
+    pen.line(4, 15, 4, 20, 20, 20, 20, 15)
 
 
 def _draw_upload(draw: ImageDraw.ImageDraw, S: float, fg: str = None):
-    """Upload / Import Audio File Icon."""
-    color = fg or "#38bdf8"
-    cx = S * 0.5
-    # Base tray
-    draw.line([S * 0.20, S * 0.80, S * 0.80, S * 0.80], fill=color, width=int(S * 0.07))
-    # Up arrow stem
-    draw.line([cx, S * 0.72, cx, S * 0.22], fill=color, width=int(S * 0.07))
-    # Up arrow head
-    pts = [(S * 0.30, S * 0.42), (cx, S * 0.20), (S * 0.70, S * 0.42)]
-    draw.line(pts, fill=color, width=int(S * 0.07))
+    pen = _Pen(draw, S, fg)
+    pen.line(12, 15, 12, 3.5)
+    pen.line(7, 8.5, 12, 3.5, 17, 8.5)
+    _tray(pen)
 
 
 def _draw_save(draw: ImageDraw.ImageDraw, S: float, fg: str = None):
-    """Save / Disk Icon."""
-    color = fg or "#10b981"
-    pad = S * 0.18
-    # Disk body
-    draw.rounded_rectangle([pad, pad, S - pad, S - pad], radius=S * 0.08,
-                           fill="#064e3b", outline=color, width=int(S * 0.05))
-    # Top metal slider box
-    draw.rectangle([S * 0.34, pad, S * 0.66, pad + S * 0.28], fill=color)
-    # Slider notch
-    draw.rectangle([S * 0.52, pad + S * 0.05, S * 0.60, pad + S * 0.22], fill="#064e3b")
-    # Bottom label paper window
-    draw.rounded_rectangle([S * 0.28, S * 0.54, S * 0.72, S - pad - S * 0.04], radius=S * 0.04,
-                           fill="#0f172a", outline=color, width=int(S * 0.04))
+    pen = _Pen(draw, S, fg)
+    pen.line(12, 3.5, 12, 15)
+    pen.line(7, 10, 12, 15, 17, 10)
+    _tray(pen)
 
 
 def _draw_sources(draw: ImageDraw.ImageDraw, S: float, fg: str = None):
-    """Audio Sources Icon: Mixer / Sliders Badge."""
-    color = fg or "#38bdf8"
-    pad = S * 0.05
-    draw.rounded_rectangle([pad, pad, S - pad, S - pad], radius=S * 0.25,
-                           fill="#0f172a", outline="#1e293b", width=int(S * 0.04))
-    # Two horizontal slider tracks with knobs
-    draw.line([S * 0.25, S * 0.38, S * 0.75, S * 0.38], fill="#334155", width=int(S * 0.06))
-    draw.ellipse([S * 0.32, S * 0.28, S * 0.48, S * 0.48], fill=color)
-    draw.line([S * 0.25, S * 0.64, S * 0.75, S * 0.64], fill="#334155", width=int(S * 0.06))
-    draw.ellipse([S * 0.52, S * 0.54, S * 0.68, S * 0.74], fill="#c084fc")
+    """Two faders: the two sources."""
+    pen = _Pen(draw, S, fg)
+    pen.line(3.5, 8, 20.5, 8)
+    pen.line(3.5, 16, 20.5, 16)
+    pen.disc(9, 8, 2.8)
+    pen.disc(15, 16, 2.8)
 
 
 def _draw_folder(draw: ImageDraw.ImageDraw, S: float, fg: str = None):
-    """Folder Directory Icon."""
-    color = fg or "#fbbf24"
-    # Folder tab
-    draw.rounded_rectangle([S * 0.18, S * 0.22, S * 0.48, S * 0.45], radius=S * 0.05, fill="#b45309")
-    # Main folder body
-    draw.rounded_rectangle([S * 0.16, S * 0.32, S * 0.84, S * 0.78], radius=S * 0.08, fill="#78350f", outline=color, width=int(S * 0.04))
+    pen = _Pen(draw, S, fg)
+    pen.line(3, 6, 9.5, 6, 11.5, 8.5, 21, 8.5, 21, 19.5, 3, 19.5, closed=True)
 
 
 def _draw_settings(draw: ImageDraw.ImageDraw, S: float, fg: str = None):
-    """Settings Gear Icon."""
-    color = fg or "#94a3b8"
-    cx, cy = S * 0.5, S * 0.5
-    r_out, r_in = S * 0.36, S * 0.24
+    """A gear: eight teeth around a ring."""
+    pen = _Pen(draw, S, fg)
+    teeth = _Pen(draw, S, fg, weight=3.4)
     for i in range(8):
-        angle = i * (math.pi / 4)
-        tx = cx + (r_out + S * 0.06) * math.cos(angle)
-        ty = cy + (r_out + S * 0.06) * math.sin(angle)
-        draw.line([cx + r_in * math.cos(angle), cy + r_in * math.sin(angle), tx, ty],
-                  fill=color, width=int(S * 0.10))
-    draw.ellipse([cx - r_out, cy - r_out, cx + r_out, cy + r_out], fill="#1e293b", outline=color, width=int(S * 0.04))
-    draw.ellipse([cx - S * 0.12, cy - S * 0.12, cx + S * 0.12, cy + S * 0.12], fill="#0f172a")
+        a = i * math.pi / 4
+        teeth.line(12 + 7.2 * math.cos(a), 12 + 7.2 * math.sin(a),
+                   12 + 9.2 * math.cos(a), 12 + 9.2 * math.sin(a))
+    pen.circle(12, 12, 6.4)
+    pen.circle(12, 12, 2.4)
+
+
+def _draw_chevron_down(draw: ImageDraw.ImageDraw, S: float, fg: str = None):
+    _Pen(draw, S, fg).line(6.5, 9.5, 12, 15, 17.5, 9.5)
 
 
 def _draw_fallback(draw: ImageDraw.ImageDraw, S: float, fg: str = None):
-    """Fallback circle renderer."""
-    draw.ellipse([S * 0.2, S * 0.2, S * 0.8, S * 0.8], fill=fg or "#64748b")
+    _Pen(draw, S, fg).disc(12, 12, 6)
 
 
 _RENDERERS = {
@@ -463,7 +357,5 @@ _RENDERERS = {
     "sources": _draw_sources,
     "folder": _draw_folder,
     "settings": _draw_settings,
+    "chevron_down": _draw_chevron_down,
 }
-
-
-

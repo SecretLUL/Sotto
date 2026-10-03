@@ -13,7 +13,7 @@ from tkinter import ttk
 
 from .. import paths
 from ..transcribe.base import format_clock
-from . import icons
+from . import chrome, icons
 from . import theme as T
 from . import widgets as W
 
@@ -55,6 +55,7 @@ class _Modal(tk.Toplevel):
         self.title(title)
         self.resizable(False, False)
         self.transient(parent)
+        chrome.dark_title_bar(self)
         self.protocol("WM_DELETE_WINDOW", self._dismiss)
         self.bind("<Escape>", lambda _event: self._dismiss())
 

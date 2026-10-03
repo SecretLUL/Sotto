@@ -25,6 +25,7 @@ def main():
     try:
         import tkinter as tk
         from audio_transcriber import paths
+        from audio_transcriber.ui import chrome
         from audio_transcriber.ui.app import RecorderApp
     except ImportError as exc:
 
@@ -37,7 +38,12 @@ def main():
         # Before anything reads settings.json or creates bin/ and output/: a
         # packaged build older than this one kept them inside _internal.
         paths.migrate_legacy_data()
+        # Before the first window, or the taskbar files it under python.exe.
+        chrome.claim_taskbar_identity()
         root = tk.Tk()
+        # Here rather than in RecorderApp: the tests build the window too, and
+        # keep it invisible.
+        chrome.dark_title_bar(root)
         app = RecorderApp(root)
         # Once the window is up: offer to process a recording that was cut
         # short last time. Not in the constructor - the tests build the window

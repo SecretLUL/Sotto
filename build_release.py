@@ -114,7 +114,31 @@ def clean():
         os.remove(spec_file)
 
 
-def build_exe():
+def write_icon():
+    """The executable's icon, drawn like the window's (ui/icons.py).
+
+    Windows takes an .ico with every size in it; on macOS PyInstaller turns a
+    PNG into the .icns itself (with Pillow). Linux executables have no icon.
+    Kept apart from build/AudioTranscriber, which PyInstaller --clean empties.
+    """
+    if sys.platform not in ("win32", "darwin"):
+        return None
+    from audio_transcriber.ui import icons
+
+    folder = os.path.join(BUILD_DIR, "icon")
+    os.makedirs(folder, exist_ok=True)
+    if sys.platform == "win32":
+        path = os.path.join(folder, f"{APP_NAME}.ico")
+        icons.render_icon_image("app_logo", 256).save(
+            path, format="ICO",
+            sizes=[(size, size) for size in (16, 20, 24, 32, 40, 48, 64, 128, 256)])
+    else:
+        path = os.path.join(folder, f"{APP_NAME}.png")
+        icons.render_icon_image("app_logo", 1024).save(path, format="PNG")
+    return path
+
+
+def build_exe(icon=None):
     """Run PyInstaller to build the standalone executable directory."""
     print("Building executable with PyInstaller...")
 
@@ -130,6 +154,8 @@ def build_exe():
         "--collect-all", "soundfile",
         "--hidden-import", "scipy.signal",
     ]
+    if icon:
+        cmd += ["--icon", icon]
 
     # Only Windows has the WASAPI loopback fork; elsewhere plain PyAudio is
     # used and ui/app.py falls back to it at import time.
@@ -228,7 +254,7 @@ def main():
 
     print(f"--- Building {APP_NAME} {version} for {slug} ---")
     clean()
-    build_exe()
+    build_exe(icon=write_icon())
     prune_unneeded()
     verify_bundle()
     create_archive(archive_path, suffix)

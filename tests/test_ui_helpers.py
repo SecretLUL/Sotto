@@ -17,6 +17,16 @@ class TestColourMix(unittest.TestCase):
         self.assertEqual(theme.mix("#ff0000", "#0000ff", 0.5), "#800080")
 
 
+class TestTitleBarColours(unittest.TestCase):
+    """Windows takes colours as 0x00bbggrr, the other way round from #rrggbb."""
+
+    def test_the_channels_are_swapped(self):
+        from audio_transcriber.ui import chrome
+        self.assertEqual(chrome.colorref("#ff0000"), 0x0000ff)
+        self.assertEqual(chrome.colorref("#0000ff"), 0xff0000)
+        self.assertEqual(chrome.colorref("#101319"), 0x191310)
+
+
 class TestTimestampDetection(unittest.TestCase):
     def test_accepts_timestamps(self):
         for token in ("[00:00]", "[01:15]", "[01:30:12]", "[99:59]"):
