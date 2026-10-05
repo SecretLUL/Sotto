@@ -47,16 +47,10 @@ class DeviceError(RuntimeError):
     pass
 
 
-import sys
-
-_IS_WINDOWS = sys.platform == "win32"
-
-
 def enumerate_devices(pa, wasapi_only=True):
     """Read all devices from a PyAudio instance.
 
-    wasapi_only=True hides the MME/DirectSound duplicates on Windows.
-    On non-Windows systems, all devices (including PulseAudio/PipeWire monitors) are shown.
+    wasapi_only=True hides the MME/DirectSound duplicates.
     """
     host_names = {}
     for index in range(pa.get_host_api_count()):
@@ -67,7 +61,7 @@ def enumerate_devices(pa, wasapi_only=True):
 
     wasapi_ids = {index for index, name in host_names.items()
                   if any(tag in name for tag in WASAPI_HOST_NAMES)}
-    if (wasapi_only and not wasapi_ids) or not _IS_WINDOWS:
+    if wasapi_only and not wasapi_ids:
         wasapi_only = False
 
     devices = []
@@ -79,21 +73,14 @@ def enumerate_devices(pa, wasapi_only=True):
         if wasapi_only and info.get("hostApi") not in wasapi_ids:
             continue
 
-        dev_name = str(info.get("name", f"Device {index}"))
-        is_loopback = bool(info.get("isLoopbackDevice", False))
-        if not is_loopback and not _IS_WINDOWS and int(info.get("maxInputChannels", 0)) > 0:
-            name_low = dev_name.lower()
-            if any(kw in name_low for kw in ("monitor", "loopback", "blackhole", "soundflower")):
-                is_loopback = True
-
         devices.append(Device(
             index=index,
-            name=dev_name,
+            name=str(info.get("name", f"Device {index}")),
             host_api=host_names.get(info.get("hostApi"), "?"),
             max_input_channels=int(info.get("maxInputChannels", 0)),
             max_output_channels=int(info.get("maxOutputChannels", 0)),
             default_rate=int(info.get("defaultSampleRate", 48000)),
-            is_loopback=is_loopback,
+            is_loopback=bool(info.get("isLoopbackDevice", False)),
         ))
     return devices
 

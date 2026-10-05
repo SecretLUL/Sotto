@@ -13,7 +13,6 @@ Fixes H8 and M2:
 import hashlib
 import http.client
 import os
-import shutil
 import threading
 import time
 import urllib.error
@@ -25,10 +24,8 @@ from ..paths import BIN_DIR, WHISPER_EXE, model_path
 USER_AGENT = "AudioTranscriber/2.0 (+local)"
 CONNECT_TIMEOUT = 30
 
-_IS_WINDOWS = os.name == "nt"
-
-# The only prebuilt whisper.cpp this app knows is the Windows (Vulkan) one below,
-# a third-party build of the upstream project. It is executed after download,
+# The prebuilt whisper.cpp this app uses is the Windows (Vulkan) one below, a
+# third-party build of the upstream project. It is executed after download,
 # so it is pinned to the exact archive: GitHub's digest for that release asset
 # (created 2026-06-20, not modified since).
 WHISPER_ZIP_URL = ("https://github.com/lemonade-sdk/whisper.cpp-rocm/releases/"
@@ -85,15 +82,6 @@ MODEL_SIZE_BYTES = {
     "large-v3-turbo": 1_624_555_275,
     "large-v3": 3_095_033_483,
 }
-
-NO_WHISPER_HINT = (
-    "The local engine needs whisper.cpp's command-line program (whisper-cli), "
-    "which this app only downloads automatically on Windows. Install it - "
-    "macOS: 'brew install whisper-cpp'; Linux: build "
-    "https://github.com/ggml-org/whisper.cpp or use your distribution's "
-    "package - so that 'whisper-cli' is on the PATH, or copy it to "
-    "{bin_dir}. Or choose the ElevenLabs engine in the settings.")
-
 
 class DownloadError(RuntimeError):
     pass
@@ -231,46 +219,17 @@ def safe_extract(zip_path, dest_dir):
 
 
 # ----------------------------------------------------------------------
-def find_whisper_executable(which=shutil.which, windows=None):
-    """The whisper.cpp command-line program that is available, or None.
-
-    Windows: the one in bin/ - fetched on demand by ensure_whisper_binary().
-    Elsewhere nothing is fetched (the only prebuilt build known here is a
-    Windows one), so: bin/whisper-cli if the user put one there, else
-    'whisper-cli' (Homebrew, a source build) or 'whisper-cpp' on the PATH.
-    """
-    windows = _IS_WINDOWS if windows is None else windows
-    if os.path.exists(WHISPER_EXE):
-        return WHISPER_EXE
-    if windows:
-        return None
-    for name in ("whisper-cli", "whisper-cpp"):
-        found = which(name)
-        if found:
-            return found
-    return None
-
-
-def local_engine_problem(which=shutil.which, windows=None):
-    """Why the local engine cannot run right now, or None if it can.
-
-    Windows can always fetch what is missing; elsewhere a missing whisper-cli
-    is the user's to install - and worth saying before a recording rather than
-    after it.
-    """
-    windows = _IS_WINDOWS if windows is None else windows
-    if windows or find_whisper_executable(which=which, windows=windows):
-        return None
-    return NO_WHISPER_HINT.format(bin_dir=BIN_DIR)
+def find_whisper_executable():
+    """whisper.cpp's command-line program in bin/, or None until
+    ensure_whisper_binary() has fetched it."""
+    return WHISPER_EXE if os.path.exists(WHISPER_EXE) else None
 
 
 def ensure_whisper_binary(progress=None, log=None, cancelled=None, on_bytes=None):
-    """Make sure whisper-cli (whisper-cli.exe on Windows) is available."""
+    """Make sure whisper-cli.exe is available."""
     found = find_whisper_executable()
     if found:
         return found
-    if not _IS_WINDOWS:
-        raise DownloadError(NO_WHISPER_HINT.format(bin_dir=BIN_DIR))
 
     # Check, lock, check again: whoever waited here finds it done afterwards.
     with _lock_for(WHISPER_EXE):

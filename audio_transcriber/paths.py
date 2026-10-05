@@ -14,9 +14,8 @@ Where that directory is (resolve_data_dir):
     (the multi-GB models), output/ and settings.json used to end up: gone with
     every update of the app folder, and not writable wherever the app is
     installed read-only.
-  * If the folder next to the executable is not writable, and always on macOS
-    (writing into a .app breaks its signature, and a quarantined app is run
-    from a read-only copy): the per-user data folder.
+  * If the folder next to the executable is not writable: the per-user data
+    folder, %LOCALAPPDATA%\\AudioTranscriber.
 """
 
 import os
@@ -53,42 +52,32 @@ def is_writable(directory):
     is minutes of a frozen start-up, in the one place this check exists for.
     """
     probe = os.path.join(directory, f".write-test-{uuid.uuid4().hex}")
-    # O_TEMPORARY (Windows) deletes the file when it is closed.
-    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_TEMPORARY", 0)
+    # O_TEMPORARY deletes the file when it is closed.
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_TEMPORARY
     try:
         os.close(os.open(probe, flags))
     except OSError:
         return False
-    try:
-        os.remove(probe)               # POSIX; on Windows it is already gone
-    except OSError:
-        pass
     return True
 
 
-def _user_data_dir(platform, env, home):
-    if platform == "win32":
-        base = (env.get("LOCALAPPDATA") or env.get("APPDATA")
-                or os.path.join(home, "AppData", "Local"))
-    elif platform == "darwin":
-        base = os.path.join(home, "Library", "Application Support")
-    else:
-        base = env.get("XDG_DATA_HOME") or os.path.join(home, ".local", "share")
+def _user_data_dir(env, home):
+    base = (env.get("LOCALAPPDATA") or env.get("APPDATA")
+            or os.path.join(home, "AppData", "Local"))
     return os.path.join(base, APP_NAME)
 
 
 def resolve_data_dir(source_dir=None, frozen=None, executable=None,
-                     platform=None, env=None, home=None, writable=None):
+                     env=None, home=None, writable=None):
     """Where settings.json, bin/ and output/ live (see the module docstring).
 
-    The arguments exist so the decision can be tested for every platform; the
-    defaults describe this process. They are looked up at call time, not bound
-    when the module is imported.
+    The arguments exist so the decision can be tested; the defaults describe
+    this process. They are looked up at call time, not bound when the module
+    is imported.
     """
     source_dir = SOURCE_DIR if source_dir is None else source_dir
     frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
     executable = sys.executable if executable is None else executable
-    platform = sys.platform if platform is None else platform
     env = os.environ if env is None else env
     home = os.path.expanduser("~") if home is None else home
     writable = is_writable if writable is None else writable
@@ -99,11 +88,10 @@ def resolve_data_dir(source_dir=None, frozen=None, executable=None,
     if not frozen:
         return source_dir
 
-    if platform != "darwin":
-        beside_executable = os.path.dirname(os.path.abspath(executable))
-        if writable(beside_executable):
-            return beside_executable
-    return _user_data_dir(platform, env, home)
+    beside_executable = os.path.dirname(os.path.abspath(executable))
+    if writable(beside_executable):
+        return beside_executable
+    return _user_data_dir(env, home)
 
 
 DATA_DIR = resolve_data_dir()
@@ -115,10 +103,9 @@ TMP_DIR = os.path.join(OUT_DIR, ".tmp")
 CFG_PATH = os.path.join(DATA_DIR, "settings.json")
 LOG_PATH = os.path.join(DATA_DIR, "recorder.log")
 
-# Where a whisper-cli that was put into bin/ is expected. Only Windows gets one
-# downloaded there (transcribe/binaries.py).
-WHISPER_EXE = os.path.join(BIN_DIR, "whisper-cli.exe" if os.name == "nt"
-                           else "whisper-cli")
+# Where whisper.cpp's command-line program is downloaded to
+# (transcribe/binaries.py).
+WHISPER_EXE = os.path.join(BIN_DIR, "whisper-cli.exe")
 
 # What a packaged build used to keep inside PyInstaller's _internal folder.
 LEGACY_ITEMS = ("settings.json", "bin", "output")
@@ -231,8 +218,7 @@ def _is_legacy_install(directory):
     Recognised by its executable, so that a folder that merely holds a bin/ or
     an output/ of its own is left alone.
     """
-    return any(os.path.isfile(os.path.join(directory, LEGACY_INSTALL_NAME + suffix))
-               for suffix in (".exe", ""))
+    return os.path.isfile(os.path.join(directory, LEGACY_INSTALL_NAME + ".exe"))
 
 
 def _move_item(source, data_dir, name):
@@ -270,13 +256,8 @@ def model_path(model_name):
 def safe_output_name(user_input, default="my_meeting"):
     """Turn user input into a safe base name without any path component.
 
-    Blocks path traversal ('..\\..\\windows\\x') and empty names.
-
-    Both separators are stripped on every platform. os.path.basename() follows
-    the host rules, so on Linux and macOS a backslash is an ordinary character
-    and a name written on Windows sanitised to something else entirely - the
-    same settings.json produced a different file name depending on where it
-    ran. The result is still safe either way, just not the same.
+    Blocks path traversal ('..\\..\\windows\\x') and empty names. Both
+    separators count as one.
 
     Pass the name as it was typed or as the file is called - extension
     included. Exactly one known audio/transcript extension is removed; any
@@ -314,7 +295,7 @@ def scratch_name(*labels, suffix=".wav"):
     return "-".join(parts) + suffix
 
 
-def ansi_safe_path(path, windows=None, short_path=None):
+def ansi_safe_path(path, short_path=None):
     """`path` in a form whisper-cli.exe can open, given its ANSI arguments.
 
     scratch_name() keeps user text out of file names, but the directories are
@@ -325,11 +306,9 @@ def ansi_safe_path(path, windows=None, short_path=None):
     does not exist, leaves the path unchanged - the call then fails as it
     always did.
 
-    `windows` and `short_path` exist so the logic can be tested anywhere.
+    `short_path` exists so the logic can be tested without such a volume.
     """
-    if windows is None:
-        windows = os.name == "nt"
-    if not windows or path.isascii():
+    if path.isascii():
         return path
     short_path = short_path or _windows_short_path
     try:

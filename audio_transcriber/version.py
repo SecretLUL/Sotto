@@ -4,17 +4,18 @@ A packaged build carries its version in a file next to this module (RELEASE),
 written by build_release.py from the tag the build was made for. A run from
 source has none: it is whatever the checkout holds, and updates come with git.
 
-The archive names live here rather than in build_release.py because the app
-needs them too: the updater picks the download for this system by the same
-name the build gave it.
+The archive name lives here rather than in build_release.py because the app
+needs it too: the updater picks its download by the same name the build gave
+it.
 """
 
 import os
-import platform
 import re
-import sys
 
 APP_NAME = "Sotto"
+
+# What the download is built for - the only system Sotto is released for.
+ARCHIVE_SLUG = "windows-x64"
 
 RELEASE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "RELEASE")
 
@@ -72,22 +73,6 @@ def is_newer(candidate, installed):
     return new[3] > old[3]
 
 
-def platform_tag(system=None, machine=None):
-    """(archive suffix, platform slug) for a system - this one by default."""
-    system = sys.platform if system is None else system
-    if system == "win32":
-        return "zip", "windows-x64"
-    if system == "darwin":
-        # Not "universal": PyInstaller builds for the host architecture only
-        # unless target_arch=universal2 is set explicitly, so an arm64 runner
-        # produces an arm64-only binary. Naming it universal promised Intel
-        # users a build that would not run for them.
-        machine = (platform.machine() if machine is None else machine).lower()
-        return "zip", "macos-arm64" if machine in ("arm64", "aarch64") else "macos-x64"
-    return "tar.gz", "linux-x64"
-
-
-def archive_name(tag, system=None, machine=None):
-    """'Sotto-v1.2.3-windows-x64.zip': the download of `tag` for a system."""
-    suffix, slug = platform_tag(system, machine)
-    return f"{APP_NAME}-{tag}-{slug}.{suffix}"
+def archive_name(tag):
+    """'Sotto-v1.2.3-windows-x64.zip': the download of `tag`."""
+    return f"{APP_NAME}-{tag}-{ARCHIVE_SLUG}.zip"

@@ -3,7 +3,7 @@
 The way through, start to end:
   1. check_for_update() asks GitHub for the newest release and compares its
      tag with the one this build was made for (version.current()).
-  2. prepare() downloads the archive for this system and SHA256SUMS.txt from
+  2. prepare() downloads the Windows archive and SHA256SUMS.txt from
      that release, refuses an archive whose checksum does not match, and
      unpacks it into the workspace: <install folder>/.update/staged/Sotto.
   3. start_install() runs the NEW executable from there as the installer
@@ -20,15 +20,15 @@ that knows how its files are laid out. The command line of step 3 is the
 contract between an old version and the next one - keep accepting it.
 
 Only the program files are replaced: the entries at the top of the release
-archive (Sotto.exe or Sotto, and _internal). A portable install keeps its
+archive (Sotto.exe and _internal). A portable install keeps its
 models, recordings and settings in the same folder (paths.resolve_data_dir),
 and none of that is in an archive - one that tried to bring a bin/ or a
 settings.json along is refused. The swap is renames within one folder, so
 it takes a moment, and a failure half way puts every old file back.
 
-Where the app cannot replace itself - run from source, on macOS (an app
-bundle, unsigned), from a folder it cannot write to - it still says that a
-new version is out, and offers the release page instead.
+Where the app cannot replace itself - run from source, from a folder it
+cannot write to - it still says that a new version is out, and offers the
+release page instead.
 """
 
 import argparse
@@ -37,7 +37,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tarfile
 import threading
 import time
 import urllib.error
@@ -53,6 +52,9 @@ LATEST_URL = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
 RELEASES_PAGE = f"https://github.com/{REPOSITORY}/releases/latest"
 SUMS_NAME = "SHA256SUMS.txt"
 CHECK_TIMEOUT_S = 15
+
+# The program file, at the top of a release archive and of an install.
+EXE_NAME = f"{version.APP_NAME}.exe"
 
 # The workspace in the install folder, and what it holds.
 WORKSPACE_NAME = ".update"
@@ -100,7 +102,7 @@ class Asset:
 class Release:
     tag: str
     page_url: str
-    archive: Asset = None      # the download for this system; None if it has none
+    archive: Asset = None      # the Windows download; None if it has none
     sums: Asset = None
 
 
@@ -134,7 +136,7 @@ def fetch_latest(timeout=CHECK_TIMEOUT_S, urlopen=None):
     return data
 
 
-def release_from_json(data, system=None, machine=None):
+def release_from_json(data):
     """The Release in GitHub's answer, or None if it is not one to install."""
     tag = str(data.get("tag_name") or "").strip()
     if data.get("draft") or data.get("prerelease") or version.parse(tag) is None:
@@ -154,13 +156,13 @@ def release_from_json(data, system=None, machine=None):
     if not page.startswith("https://github.com/"):
         page = RELEASES_PAGE
     return Release(tag, page,
-                   archive=assets.get(version.archive_name(tag, system, machine)),
+                   archive=assets.get(version.archive_name(tag)),
                    sums=assets.get(SUMS_NAME))
 
 
-def check_for_update(installed, fetch=None, system=None, machine=None):
+def check_for_update(installed, fetch=None):
     """The newest release if it is newer than `installed`, else None."""
-    release = release_from_json((fetch or fetch_latest)(), system, machine)
+    release = release_from_json((fetch or fetch_latest)())
     if release is None or not version.is_newer(release.tag, installed):
         return None
     return release
@@ -169,11 +171,6 @@ def check_for_update(installed, fetch=None, system=None, machine=None):
 # ----------------------------------------------------------------------
 # Can this build replace itself?
 # ----------------------------------------------------------------------
-def executable_name(system=None):
-    system = sys.platform if system is None else system
-    return f"{version.APP_NAME}.exe" if system == "win32" else version.APP_NAME
-
-
 def install_dir(executable=None):
     return os.path.dirname(os.path.abspath(sys.executable if executable is None
                                            else executable))
@@ -183,20 +180,16 @@ def workspace(target=None):
     return os.path.join(install_dir() if target is None else target, WORKSPACE_NAME)
 
 
-def install_problem(frozen=None, system=None, executable=None, writable=None):
+def install_problem(frozen=None, executable=None, writable=None):
     """Why this build cannot install an update itself, or None if it can."""
     frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
-    system = sys.platform if system is None else system
     executable = sys.executable if executable is None else executable
     writable = paths.is_writable if writable is None else writable
 
     if not frozen:
         return "Sotto runs from its source code here; update it with git pull."
-    if system == "darwin":
-        return ("On macOS Sotto cannot replace itself yet: download the new "
-                "version and put it in place of the old one.")
-    if os.path.basename(executable) != executable_name(system):
-        return (f"The program file is no longer called {executable_name(system)}, "
+    if os.path.basename(executable) != EXE_NAME:
+        return (f"The program file is no longer called {EXE_NAME}, "
                 f"so the update would not know what to replace.")
     if not writable(install_dir(executable)):
         return ("Sotto's folder is read-only for your account. Download the new "
@@ -208,8 +201,8 @@ def install_problem(frozen=None, system=None, executable=None, writable=None):
 # Download, verify, unpack
 # ----------------------------------------------------------------------
 def prepare(release, workspace_dir, download=None, cancelled=None, on_bytes=None,
-            log=None, system=None, disk_usage=shutil.disk_usage):
-    """Fetch `release` for this system and unpack it, ready to install.
+            log=None, disk_usage=shutil.disk_usage):
+    """Fetch `release` and unpack it, ready to install.
 
     Returns the unpacked app folder (the one with the executable in it).
     Raises UpdateError, or binaries.DownloadError for a failed or cancelled
@@ -218,8 +211,8 @@ def prepare(release, workspace_dir, download=None, cancelled=None, on_bytes=None
     download = download or binaries.download
     log = log or (lambda _message: None)
     if release.archive is None:
-        _suffix, slug = version.platform_tag(system)
-        raise UpdateError(f"{release.tag} has no download for this system ({slug}).")
+        raise UpdateError(f"{release.tag} has no download for Windows "
+                          f"({version.ARCHIVE_SLUG}).")
     if release.sums is None:
         raise UpdateError(f"{release.tag} comes without checksums, and an "
                           f"unverified download is not installed.")
@@ -260,7 +253,7 @@ def prepare(release, workspace_dir, download=None, cancelled=None, on_bytes=None
         log("Unpacking…")
         staged = os.path.join(workspace_dir, STAGED_DIR)
         extract(archive, staged)
-        app = _app_folder(staged, system)
+        app = _app_folder(staged)
         _remove(download_dir)              # the archive is not needed any more
         return app
 
@@ -279,28 +272,17 @@ def read_sums(path):
 def extract(archive, dest):
     """Unpack a release archive into `dest`, refusing paths that leave it."""
     os.makedirs(dest, exist_ok=True)
-    if archive.endswith(".zip"):
-        binaries.safe_extract(archive, dest)
-        return
-    if not hasattr(tarfile, "data_filter"):
-        raise UpdateError("This Python cannot unpack the archive safely.")
-    try:
-        with tarfile.open(archive, "r:gz") as tar:
-            # "data": nothing outside dest, no devices, no setuid - but the
-            # executable keeps its executable bit.
-            tar.extractall(dest, filter="data")
-    except (tarfile.TarError, OSError) as exc:
-        raise UpdateError(f"The archive could not be unpacked ({exc}).") from exc
+    binaries.safe_extract(archive, dest)
 
 
-def _app_folder(staged, system=None):
+def _app_folder(staged):
     """The one Sotto folder an archive unpacks to, checked."""
     entries = os.listdir(staged)
     app = os.path.join(staged, version.APP_NAME)
     if entries != [version.APP_NAME] or not os.path.isdir(app):
         raise UpdateError(f"The download does not unpack to a single "
                           f"{version.APP_NAME} folder.")
-    check_program_names(os.listdir(app), executable_name(system))
+    check_program_names(os.listdir(app), EXE_NAME)
     return app
 
 
@@ -317,8 +299,8 @@ def check_program_names(names, exe_name):
 # ----------------------------------------------------------------------
 # Install: the old app starts the installer, the installer swaps the files
 # ----------------------------------------------------------------------
-def helper_command(staged_app, target, pid, relaunch, system=None):
-    command = [os.path.join(staged_app, executable_name(system)), HELPER_FLAG,
+def helper_command(staged_app, target, pid, relaunch):
+    command = [os.path.join(staged_app, EXE_NAME), HELPER_FLAG,
                "--source", staged_app, "--target", target, "--wait-pid", str(pid)]
     if relaunch:
         command.append("--relaunch")
@@ -372,7 +354,7 @@ def apply_from_command_line(argv):
 
     if args.relaunch:
         try:
-            _launch([os.path.join(args.target, executable_name())], cwd=args.target)
+            _launch([os.path.join(args.target, EXE_NAME)], cwd=args.target)
         except OSError as exc:
             _log(workspace_dir, f"Could not start Sotto again: {exc}")
     return 0
@@ -386,7 +368,7 @@ def install(source, target, workspace_dir, exe_name=None):
     place. A failure on the way moves everything back. Anything in `target`
     that is not in `source` (the data) is left alone.
     """
-    exe_name = exe_name or executable_name()
+    exe_name = exe_name or EXE_NAME
     names = os.listdir(source)
     check_program_names(names, exe_name)
     # The executable last: until it is swapped, the old one is still complete.
@@ -474,22 +456,6 @@ def cleanup(workspace_dir=None, attempts=None):
 
 def wait_for_exit(pid, timeout):
     """True once process `pid` has ended, False if it still runs after `timeout`."""
-    if os.name == "nt":
-        return _wait_for_exit_windows(pid, timeout)
-    deadline = time.monotonic() + timeout
-    while True:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return True
-        except PermissionError:
-            pass                       # it exists, it is just not ours
-        if time.monotonic() >= deadline:
-            return False
-        time.sleep(0.1)
-
-
-def _wait_for_exit_windows(pid, timeout):
     import ctypes
     from ctypes import wintypes
 
@@ -513,9 +479,9 @@ def _wait_for_exit_windows(pid, timeout):
 def child_environment(env=None, frozen=None):
     """The environment for a program started from this one, without the bundle's.
 
-    A PyInstaller build changes its own environment on the way up: Linux gets
-    LD_LIBRARY_PATH pointed into _internal, Tk gets TCL_LIBRARY, and the
-    bootloader leaves _PYI_ variables that tell a child it is part of the same
+    A PyInstaller build changes its own environment on the way up: Tk gets
+    TCL_LIBRARY pointed into _internal, and the bootloader leaves _PYI_
+    variables that tell a child it is part of the same
     application. Handed on unchanged, the new version would start with the old
     one's libraries - from a folder the installer has just moved away.
     """
@@ -526,12 +492,6 @@ def child_environment(env=None, frozen=None):
     for key in list(env):
         if key.startswith("_PYI_") or key in ("_MEIPASS2", "TCL_LIBRARY", "TK_LIBRARY"):
             del env[key]
-    for key in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"):
-        original = env.pop(key + "_ORIG", None)
-        if original is not None:
-            env[key] = original
-        else:
-            env.pop(key, None)
     env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
     return env
 
@@ -539,15 +499,11 @@ def child_environment(env=None, frozen=None):
 def _launch(command, cwd, popen=None):
     """Start `command` on its own: no console, not tied to this process."""
     popen = popen or subprocess.Popen
-    options = dict(cwd=cwd, env=child_environment(), stdin=subprocess.DEVNULL,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                   close_fds=True)
-    if os.name == "nt":
-        options["creationflags"] = (subprocess.DETACHED_PROCESS
-                                    | subprocess.CREATE_NEW_PROCESS_GROUP)
-    else:
-        options["start_new_session"] = True
-    return popen(command, **options)
+    return popen(command, cwd=cwd, env=child_environment(),
+                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                 stderr=subprocess.DEVNULL, close_fds=True,
+                 creationflags=(subprocess.DETACHED_PROCESS
+                                | subprocess.CREATE_NEW_PROCESS_GROUP))
 
 
 def _log(workspace_dir, message):

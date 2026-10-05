@@ -3,8 +3,8 @@
 Builds a standalone executable using PyInstaller, prunes heavy unused packages
 from the local environment, and packages the result into a release archive.
 
-Runs on Windows, Linux and macOS - the CI calls this same script on all three
-so the archive naming lives in exactly one place.
+Windows only, like the app. The CI calls this same script, so the archive
+naming lives in exactly one place.
 
 Version resolution, highest priority first:
     1. python build_release.py v1.2.3
@@ -17,7 +17,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tarfile
 import zipfile
 
 from audio_transcriber import version as app_version
@@ -33,7 +32,6 @@ ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 DIST_DIR = os.path.join(ROOT_DIR, "dist")
 BUILD_DIR = os.path.join(ROOT_DIR, "build")
 APP_DIST_DIR = os.path.join(DIST_DIR, APP_NAME)
-MAC_APP_DIR = os.path.join(DIST_DIR, f"{APP_NAME}.app")
 
 # Heavy packages from the local Python environment that the app does not use.
 # NOTE: Pillow (PIL) must NOT be listed here - ui/icons.py imports it at module
@@ -90,15 +88,6 @@ def _normalize_version(value):
     return value if value.startswith("v") else f"v{value}"
 
 
-def platform_tag():
-    """(archive suffix, platform slug) for the current OS.
-
-    Defined in the app (version.py): the updater looks for its download under
-    the very name this build gives it.
-    """
-    return app_version.platform_tag()
-
-
 # ----------------------------------------------------------------------
 def clean():
     """Clean build artifacts."""
@@ -114,24 +103,17 @@ def clean():
 def write_icon():
     """The executable's icon, drawn like the window's (ui/icons.py).
 
-    Windows takes an .ico with every size in it; on macOS PyInstaller turns a
-    PNG into the .icns itself (with Pillow). Linux executables have no icon.
-    Kept apart from build/Sotto, which PyInstaller --clean empties.
+    An .ico with every size in it. Kept apart from build/Sotto, which
+    PyInstaller --clean empties.
     """
-    if sys.platform not in ("win32", "darwin"):
-        return None
     from audio_transcriber.ui import icons
 
     folder = os.path.join(BUILD_DIR, "icon")
     os.makedirs(folder, exist_ok=True)
-    if sys.platform == "win32":
-        path = os.path.join(folder, f"{APP_NAME}.ico")
-        icons.render_icon_image("app_logo", 256).save(
-            path, format="ICO",
-            sizes=[(size, size) for size in (16, 20, 24, 32, 40, 48, 64, 128, 256)])
-    else:
-        path = os.path.join(folder, f"{APP_NAME}.png")
-        icons.render_icon_image("app_logo", 1024).save(path, format="PNG")
+    path = os.path.join(folder, f"{APP_NAME}.ico")
+    icons.render_icon_image("app_logo", 256).save(
+        path, format="ICO",
+        sizes=[(size, size) for size in (16, 20, 24, 32, 40, 48, 64, 128, 256)])
     return path
 
 
@@ -163,6 +145,7 @@ def build_exe(icon=None, release_file=None):
         "--noconfirm",
         "--clean",
         "--collect-all", "soundfile",
+        "--collect-all", "pyaudiowpatch",
         "--hidden-import", "scipy.signal",
     ]
     if icon:
@@ -170,11 +153,6 @@ def build_exe(icon=None, release_file=None):
     if release_file:
         # Next to the package's modules, where version.py looks for it.
         cmd += ["--add-data", f"{release_file}{os.pathsep}audio_transcriber"]
-
-    # Only Windows has the WASAPI loopback fork; elsewhere plain PyAudio is
-    # used and ui/app.py falls back to it at import time.
-    if sys.platform == "win32":
-        cmd += ["--collect-all", "pyaudiowpatch"]
 
     for mod in UNNEEDED_PACKAGES:
         cmd.extend(["--exclude-module", mod])
@@ -241,42 +219,39 @@ def verify_bundle():
     print("Bundle verified: all startup imports are present.")
 
 
-def create_archive(archive_path, suffix):
+def create_archive(archive_path):
     """Package the built application directory into the release archive."""
     print(f"Creating archive: {archive_path}...")
 
-    # macOS --windowed produces a .app bundle next to the plain directory.
-    source_dir = MAC_APP_DIR if os.path.isdir(MAC_APP_DIR) else APP_DIST_DIR
-    arc_root = os.path.basename(source_dir)
-
-    if suffix == "tar.gz":
-        with tarfile.open(archive_path, "w:gz") as tar:
-            tar.add(source_dir, arcname=arc_root)
-    else:
-        with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zip_file:
-            for root, _dirs, files in os.walk(source_dir):
-                for file in files:
-                    full_path = os.path.join(root, file)
-                    rel_path = os.path.join(
-                        arc_root, os.path.relpath(full_path, source_dir))
-                    zip_file.write(full_path, rel_path)
+    arc_root = os.path.basename(APP_DIST_DIR)
+    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        for root, _dirs, files in os.walk(APP_DIST_DIR):
+            for file in files:
+                full_path = os.path.join(root, file)
+                rel_path = os.path.join(
+                    arc_root, os.path.relpath(full_path, APP_DIST_DIR))
+                zip_file.write(full_path, rel_path)
 
     size_mb = os.path.getsize(archive_path) / (1024 * 1024)
     print(f"Release package created: {os.path.basename(archive_path)} ({size_mb:.1f} MB)")
 
 
 def main():
-    version = resolve_version()
-    suffix, slug = platform_tag()
-    archive_name = f"{APP_NAME}-{version}-{slug}.{suffix}"
-    archive_path = os.path.join(DIST_DIR, archive_name)
+    if sys.platform != "win32":
+        print(f"ERROR: {APP_NAME} is built on Windows only.")
+        sys.exit(1)
 
-    print(f"--- Building {APP_NAME} {version} for {slug} ---")
+    version = resolve_version()
+    # Named in the app (version.py): the updater looks for its download under
+    # the very name this build gives it.
+    archive_path = os.path.join(DIST_DIR, app_version.archive_name(version))
+
+    print(f"--- Building {APP_NAME} {version} for {app_version.ARCHIVE_SLUG} ---")
     clean()
     build_exe(icon=write_icon(), release_file=write_release_file(version))
     prune_unneeded()
     verify_bundle()
-    create_archive(archive_path, suffix)
+    create_archive(archive_path)
     print("\n--- RELEASE BUILD COMPLETE ---")
     print(f"Archive ready for GitHub Release: {archive_path}")
 

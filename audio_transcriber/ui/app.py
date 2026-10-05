@@ -16,13 +16,8 @@ import webbrowser
 from dataclasses import asdict
 from tkinter import filedialog, messagebox, ttk
 
-try:
-    # Windows: the WASAPI loopback fork. Everywhere else plain PyAudio - the
-    # app then has no loopback capture, but recording and file upload work.
-    # capture.py does the same dance when it opens a stream.
-    import pyaudiowpatch as pyaudio
-except ImportError:
-    import pyaudio
+# PyAudio with WASAPI loopback, for the system audio.
+import pyaudiowpatch as pyaudio
 
 from .. import config, paths, pipeline, preflight, update, version
 from ..audio import capture
@@ -55,14 +50,9 @@ SCREEN_MARGIN = (24, 96)
 # its reader threads with a 2 s timeout each, so this leaves room for both.
 DEVICE_READY_TIMEOUT_S = 6.0
 
-# What the key field says about its key. The second is for systems without the
-# Windows DPAPI, where the key cannot be stored at all - the hint used to claim
-# the encryption there as well.
+# What the key field says about its key.
 KEY_HINT_STORED = ("Encrypted with the Windows DPAPI and bound to your user "
                    "account — never stored in clear text.")
-KEY_HINT_SESSION = ("This system has no secure place for the key, so it is kept "
-                    "only until you close the app. Set the ELEVENLABS_API_KEY "
-                    "environment variable to keep it.")
 
 
 class RecorderApp:
@@ -117,15 +107,14 @@ class RecorderApp:
 
         for warning in warnings:
             self.transcript.append(f"⚠ {warning}\n")
-        if self.settings.migrated_plaintext_key and config.key_can_be_stored():
+        if self.settings.migrated_plaintext_key:
             self.transcript.append(
                 "→ The key will be stored encrypted the next time you save.\n\n")
 
         self.refresh_devices()
         # The window now shows what settings.json holds - unless reading it
         # had something to correct or a key still has to be encrypted.
-        needs_saving = bool(warnings) or (self.settings.migrated_plaintext_key
-                                          and config.key_can_be_stored())
+        needs_saving = bool(warnings) or self.settings.migrated_plaintext_key
         self._saved_settings = None if needs_saving else self._settings_in_window()
         self._refresh_save_button()
         self._tick()
@@ -380,7 +369,7 @@ class RecorderApp:
             body, "ElevenLabs API key",
             lambda p: ttk.Entry(p, show="•", style="Dark.TEntry",
                                 font=T.fonts["body"]),
-            hint=KEY_HINT_STORED if config.key_can_be_stored() else KEY_HINT_SESSION,
+            hint=KEY_HINT_STORED,
             icon_name="lock", aside=show_button)
         self.key_field.grid(row=2, column=0, columnspan=2, sticky="ew",
                             pady=(T.MD, 0))
@@ -1269,7 +1258,6 @@ class RecorderApp:
         named = f"'{key}'"
         model_here = binaries.model_present(key)
         engine_here = binaries.find_whisper_executable() is not None
-        engine_problem = binaries.local_engine_problem()
         error = self._model_fetch_error
         if error is not None and error[0] != key:
             error = None
@@ -1282,9 +1270,6 @@ class RecorderApp:
                 "check", T.OK, "Downloaded",
                 f"The model {named} is on this computer, ready to transcribe "
                 f"without an internet connection.")
-        elif model_here and engine_problem:
-            self._show_model_state("warning", T.WARN, "whisper.cpp is missing",
-                                   engine_problem)
         elif model_here:
             self._show_model_state(
                 "save", T.WARN, "Almost ready",

@@ -9,7 +9,6 @@ import queue
 import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
 import unittest
 import urllib.error
@@ -27,8 +26,7 @@ TAG = "v2.1.0"
 
 def _release_json(tag=TAG, names=None, **extra):
     names = names if names is not None else [
-        f"Sotto-{tag}-windows-x64.zip", f"Sotto-{tag}-linux-x64.tar.gz",
-        f"Sotto-{tag}-macos-arm64.zip", "SHA256SUMS.txt"]
+        f"Sotto-{tag}-windows-x64.zip", "SHA256SUMS.txt"]
     data = {
         "tag_name": tag,
         "html_url": f"https://github.com/SecretLUL/Sotto/releases/tag/{tag}",
@@ -46,15 +44,6 @@ def _write_zip(path, files):
     with zipfile.ZipFile(path, "w") as archive:
         for name, content in files.items():
             archive.writestr(name, content)
-
-
-def _write_tar(path, files, modes=None):
-    with tarfile.open(path, "w:gz") as archive:
-        for name, content in files.items():
-            info = tarfile.TarInfo(name)
-            info.size = len(content)
-            info.mode = (modes or {}).get(name, 0o644)
-            archive.addfile(info, io.BytesIO(content))
 
 
 def _sha256(path):
@@ -110,14 +99,9 @@ class TestVersion(unittest.TestCase):
                     handle.write(written)
                 self.assertEqual(version.current(path), expected)
 
-    def test_the_build_names_its_archives_as_the_updater_looks_for_them(self):
-        self.assertEqual(build_release.platform_tag(), version.platform_tag())
-        self.assertEqual(version.archive_name("v2.0.2", "win32"),
+    def test_the_archive_is_named_as_the_updater_looks_for_it(self):
+        self.assertEqual(version.archive_name("v2.0.2"),
                          "Sotto-v2.0.2-windows-x64.zip")
-        self.assertEqual(version.archive_name("v2.0.2", "linux"),
-                         "Sotto-v2.0.2-linux-x64.tar.gz")
-        self.assertEqual(version.archive_name("v2.0.2", "darwin", "arm64"),
-                         "Sotto-v2.0.2-macos-arm64.zip")
 
     def test_the_build_writes_the_version_where_the_app_reads_it(self):
         folder = tempfile.mkdtemp()
@@ -131,36 +115,33 @@ class TestVersion(unittest.TestCase):
 
 # ----------------------------------------------------------------------
 class TestFindingARelease(unittest.TestCase):
-    def test_it_picks_the_download_for_this_system(self):
-        release = update.release_from_json(_release_json(), system="win32")
+    def test_it_picks_the_windows_download(self):
+        release = update.release_from_json(_release_json())
         self.assertEqual(release.tag, TAG)
         self.assertEqual(release.archive.name, f"Sotto-{TAG}-windows-x64.zip")
         self.assertEqual(release.sums.name, "SHA256SUMS.txt")
-        linux = update.release_from_json(_release_json(), system="linux")
-        self.assertEqual(linux.archive.name, f"Sotto-{TAG}-linux-x64.tar.gz")
 
-    def test_a_release_without_a_download_for_this_system_says_so(self):
+    def test_a_release_without_a_windows_download_says_so(self):
         release = update.release_from_json(
-            _release_json(names=["SHA256SUMS.txt"]), system="win32")
+            _release_json(names=["SHA256SUMS.txt"]))
         self.assertIsNone(release.archive)
 
     def test_drafts_pre_releases_and_odd_tags_are_not_offered(self):
         for data in (_release_json(draft=True), _release_json(prerelease=True),
                      _release_json(tag="nightly")):
             with self.subTest(data=data["tag_name"]):
-                self.assertIsNone(update.release_from_json(data, system="win32"))
+                self.assertIsNone(update.release_from_json(data))
 
     def test_only_https_downloads_and_github_pages_are_taken(self):
         data = _release_json(html_url="javascript:alert(1)")
         data["assets"][0]["browser_download_url"] = "http://example.com/x.zip"
-        release = update.release_from_json(data, system="win32")
+        release = update.release_from_json(data)
         self.assertIsNone(release.archive)
         self.assertEqual(release.page_url, update.RELEASES_PAGE)
 
     def test_only_a_newer_release_is_an_update(self):
         fetch = lambda: _release_json()
-        self.assertEqual(update.check_for_update("v2.0.2", fetch=fetch,
-                                                 system="win32").tag, TAG)
+        self.assertEqual(update.check_for_update("v2.0.2", fetch=fetch).tag, TAG)
         self.assertIsNone(update.check_for_update(TAG, fetch=fetch))
         self.assertIsNone(update.check_for_update("v3.0.0", fetch=fetch))
 
@@ -204,7 +185,7 @@ class TestFindingARelease(unittest.TestCase):
 # ----------------------------------------------------------------------
 class TestWhereItCanInstallItself(unittest.TestCase):
     def problem(self, **overrides):
-        options = dict(frozen=True, system="win32",
+        options = dict(frozen=True,
                        executable=os.path.join("C:\\", "Apps", "Sotto", "Sotto.exe"),
                        writable=lambda _folder: True)
         options.update(overrides)
@@ -212,11 +193,9 @@ class TestWhereItCanInstallItself(unittest.TestCase):
 
     def test_a_packaged_build_in_a_folder_of_its_own_can(self):
         self.assertIsNone(self.problem())
-        self.assertIsNone(self.problem(system="linux", executable="/opt/Sotto/Sotto"))
 
     def test_where_it_cannot_it_says_why(self):
         self.assertIn("git pull", self.problem(frozen=False))
-        self.assertIn("macOS", self.problem(system="darwin"))
         self.assertIn("Sotto.exe", self.problem(
             executable=os.path.join("C:\\", "Apps", "Renamed.exe")))
         self.assertIn("read-only", self.problem(writable=lambda _folder: False))
@@ -256,14 +235,11 @@ class WorkspaceTestCase(unittest.TestCase):
         self.files = os.path.join(self.root, "served")
         os.makedirs(self.files)
 
-    def publish(self, files, system="win32", sums=None, modes=None):
-        """A release whose archive for `system` holds `files`."""
-        name = version.archive_name(TAG, system)
+    def publish(self, files, sums=None):
+        """A release whose archive holds `files`."""
+        name = version.archive_name(TAG)
         path = os.path.join(self.files, name)
-        if name.endswith(".zip"):
-            _write_zip(path, files)
-        else:
-            _write_tar(path, files, modes)
+        _write_zip(path, files)
         sums_path = os.path.join(self.files, update.SUMS_NAME)
         with open(sums_path, "w", encoding="utf-8") as handle:
             handle.write(sums if sums is not None
@@ -277,10 +253,9 @@ class WorkspaceTestCase(unittest.TestCase):
         self.server.add(release.sums, sums_path)
         return release
 
-    def prepare(self, release, system="win32", **options):
+    def prepare(self, release, **options):
         return update.prepare(release, self.workspace,
-                              download=self.server.download, system=system,
-                              **options)
+                              download=self.server.download, **options)
 
 
 class TestPrepare(WorkspaceTestCase):
@@ -300,18 +275,9 @@ class TestPrepare(WorkspaceTestCase):
                          "the checksums come first")
         self.assertIn(f"Downloading Sotto {TAG}…", steps)
 
-    def test_a_linux_build_keeps_its_executable_bit(self):
-        release = self.publish({"Sotto/Sotto": b"#!/bin/sh\n",
-                                "Sotto/_internal/libpython.so": b"lib"},
-                               system="linux", modes={"Sotto/Sotto": 0o755})
-        staged = self.prepare(release, system="linux")
-        if os.name != "nt":
-            self.assertTrue(os.stat(os.path.join(staged, "Sotto")).st_mode & 0o100)
-        self.assertTrue(os.path.isfile(os.path.join(staged, "Sotto")))
-
     def test_a_download_that_does_not_match_its_checksum_is_refused(self):
         release = self.publish(self.WINDOWS_BUILD,
-                               sums=f"{'a' * 64}  {version.archive_name(TAG, 'win32')}\n")
+                               sums=f"{'a' * 64}  {version.archive_name(TAG)}\n")
         with self.assertRaises(update.UpdateError) as caught:
             self.prepare(release)
         self.assertIn("checksum", str(caught.exception))
@@ -327,7 +293,7 @@ class TestPrepare(WorkspaceTestCase):
         self.assertEqual(len(self.server.requests), 1,
                          "without SHA256SUMS.txt nothing is even downloaded")
 
-    def test_a_release_without_a_build_for_this_system_is_refused(self):
+    def test_a_release_without_a_windows_build_is_refused(self):
         release = update.Release(TAG, update.RELEASES_PAGE,
                                  sums=update.Asset("SHA256SUMS.txt", "https://x"))
         with self.assertRaises(update.UpdateError) as caught:
@@ -448,12 +414,6 @@ class TestInstaller(TestInstall):
     """The installer process: main.py hands it the command line."""
 
     def run_installer(self, *extra):
-        exe = update.executable_name()
-        if exe != "Sotto.exe":           # the program file of this system
-            os.rename(os.path.join(self.source, "Sotto.exe"),
-                      os.path.join(self.source, exe))
-            os.rename(os.path.join(self.target, "Sotto.exe"),
-                      os.path.join(self.target, exe))
         launched = []
         with patch.object(update, "_launch",
                           side_effect=lambda command, cwd: launched.append(command)), \
@@ -477,7 +437,7 @@ class TestInstaller(TestInstall):
     def test_restart_now_starts_the_new_version(self):
         launched = self.run_installer("--relaunch")
         self.assertEqual(launched,
-                         [[os.path.join(self.target, update.executable_name())]])
+                         [[os.path.join(self.target, update.EXE_NAME)]])
 
     def test_a_failed_install_is_reported_and_the_old_version_restarted(self):
         shutil.rmtree(os.path.join(self.source, "_internal"))
@@ -495,7 +455,7 @@ class TestInstaller(TestInstall):
                              popen=lambda command, **options: started.append(
                                  (command, options)))
         command, options = started[0]
-        self.assertEqual(command, [os.path.join(self.source, update.executable_name()),
+        self.assertEqual(command, [os.path.join(self.source, update.EXE_NAME),
                                    "--apply-update", "--source", self.source,
                                    "--target", self.target, "--wait-pid", "4321",
                                    "--relaunch"])
@@ -538,11 +498,9 @@ class TestProcesses(unittest.TestCase):
 
     def test_the_new_version_does_not_inherit_the_old_bundles_environment(self):
         env = {"PATH": "x", "_PYI_APPLICATION_HOME_DIR": "old", "_MEIPASS2": "old",
-               "TCL_LIBRARY": "old/_tcl_data", "LD_LIBRARY_PATH": "old/_internal",
-               "LD_LIBRARY_PATH_ORIG": "/usr/local/lib", "DYLD_LIBRARY_PATH": "old"}
+               "TCL_LIBRARY": "old/_tcl_data", "TK_LIBRARY": "old/_tk_data"}
         cleaned = update.child_environment(env, frozen=True)
-        self.assertEqual(cleaned, {"PATH": "x", "LD_LIBRARY_PATH": "/usr/local/lib",
-                                   "PYINSTALLER_RESET_ENVIRONMENT": "1"})
+        self.assertEqual(cleaned, {"PATH": "x", "PYINSTALLER_RESET_ENVIRONMENT": "1"})
         self.assertEqual(update.child_environment(env, frozen=False), env)
 
 
@@ -579,8 +537,7 @@ class TestWorkers(WorkspaceTestCase):
     def test_the_download_reports_its_way_and_where_the_result_is(self):
         def prepare_fn(release, workspace_dir, **options):
             return update.prepare(release, workspace_dir,
-                                  download=self.server.download, system="win32",
-                                  **options)
+                                  download=self.server.download, **options)
 
         _worker, events = self.download(prepare_fn)
         steps = [event.step for event in events if isinstance(event, UpdateFetch)]

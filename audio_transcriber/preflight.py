@@ -64,10 +64,6 @@ def _engine(settings, recording):
                         "ElevenLabs is chosen, but no API key is set. Enter it on "
                         "the Settings tab, set the ELEVENLABS_API_KEY environment "
                         "variable, or choose a local model.")]
-    if not cloud:
-        problem = binaries.local_engine_problem()
-        if problem:
-            return [Finding(ERROR, problem)]
 
     # The models this run will load. The closing pass uses the chosen one (not
     # with the cloud); the live text and the preview, whichever of them runs,

@@ -199,8 +199,6 @@ class TestConcurrentAndCancelledDownloads(unittest.TestCase):
                 binaries.download("http://example.invalid/x", dest, "Test file")
         self.assertIn("connection was lost", str(ctx.exception))
 
-    @unittest.skipUnless(os.name == "nt",
-                         "only Windows refuses to delete an open file")
     def test_a_partial_file_in_use_is_a_download_error_not_a_permission_error(self):
         dest = os.path.join(self.dir, "model.bin")
         with open(dest + ".part", "wb") as holder:
@@ -314,11 +312,11 @@ class TestPinnedDownloads(unittest.TestCase):
 
 
 class TestFindingWhisper(unittest.TestCase):
-    """Only Windows gets a whisper-cli downloaded; elsewhere it has to exist."""
+    """whisper-cli.exe is the one in bin/, downloaded there on demand."""
 
     def setUp(self):
         self.dir = tempfile.mkdtemp()
-        self.exe = os.path.join(self.dir, "whisper-cli")
+        self.exe = os.path.join(self.dir, "whisper-cli.exe")
         self.patches = [patch.object(binaries, "WHISPER_EXE", self.exe),
                         patch.object(binaries, "BIN_DIR", self.dir)]
         for patcher in self.patches:
@@ -333,55 +331,18 @@ class TestFindingWhisper(unittest.TestCase):
         with open(self.exe, "wb"):
             pass
 
-    @staticmethod
-    def _which(*available):
-        return lambda name: f"/usr/bin/{name}" if name in available else None
-
-    def test_the_program_in_bin_wins_everywhere(self):
+    def test_the_program_in_bin_is_found(self):
         self._touch_exe()
-        for windows in (True, False):
-            with self.subTest(windows=windows):
-                self.assertEqual(
-                    binaries.find_whisper_executable(
-                        which=self._which("whisper-cli"), windows=windows),
-                    self.exe)
+        self.assertEqual(binaries.find_whisper_executable(), self.exe)
 
-    def test_windows_does_not_look_on_the_path(self):
-        self.assertIsNone(binaries.find_whisper_executable(
-            which=self._which("whisper-cli"), windows=True))
+    def test_without_it_there_is_none(self):
+        self.assertIsNone(binaries.find_whisper_executable())
 
-    def test_elsewhere_the_path_is_searched(self):
-        self.assertEqual(
-            binaries.find_whisper_executable(which=self._which("whisper-cli"),
-                                             windows=False),
-            "/usr/bin/whisper-cli")
-        self.assertEqual(
-            binaries.find_whisper_executable(which=self._which("whisper-cpp"),
-                                             windows=False),
-            "/usr/bin/whisper-cpp")
-        self.assertIsNone(binaries.find_whisper_executable(
-            which=self._which(), windows=False))
-
-    def test_a_missing_program_is_reported_before_recording_not_after(self):
-        self.assertIsNone(binaries.local_engine_problem(which=self._which(),
-                                                        windows=True))
-        self.assertIsNone(binaries.local_engine_problem(
-            which=self._which("whisper-cli"), windows=False))
-        problem = binaries.local_engine_problem(which=self._which(), windows=False)
-        self.assertIn("brew install whisper-cpp", problem)
-        self.assertIn(self.dir, problem)
-        self.assertIn("ElevenLabs", problem)
-
-    def test_nothing_is_downloaded_where_only_a_windows_build_exists(self):
-        """It used to fetch the Windows archive on Linux and macOS, 'succeed',
-        and then fail to start the .exe."""
-        with patch.object(binaries, "_IS_WINDOWS", False), \
-                patch.object(binaries, "find_whisper_executable", return_value=None), \
-                patch.object(binaries, "download") as download:
-            with self.assertRaises(binaries.DownloadError) as ctx:
-                binaries.ensure_whisper_binary()
+    def test_one_that_is_there_is_not_downloaded_again(self):
+        self._touch_exe()
+        with patch.object(binaries, "download") as download:
+            self.assertEqual(binaries.ensure_whisper_binary(), self.exe)
         download.assert_not_called()
-        self.assertIn("brew install whisper-cpp", str(ctx.exception))
 
 
 class TestSafeExtract(unittest.TestCase):

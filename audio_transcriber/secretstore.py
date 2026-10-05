@@ -5,22 +5,17 @@ it against the signed-in Windows account - another user, a copied folder or a
 backup restored on a different machine can no longer read the value.
 
 Deliberately ctypes plus the standard library only, no extra dependency.
-On non-Windows systems the module degrades cleanly: is_available() returns
-False and the caller falls back to the environment variable.
 """
 
 import base64
 import ctypes
 import os
-import sys
 from ctypes import wintypes
 
 # Extra entropy: besides the Windows account, an attacker also needs this
 # application-specific value to decrypt the blob. It predates the name Sotto and
 # must stay as it is: stored keys can only be decrypted with the same value.
 _ENTROPY = b"AudioTranscriber/v2/elevenlabs"
-
-_IS_WINDOWS = sys.platform == "win32"
 
 
 class _Blob(ctypes.Structure):
@@ -47,20 +42,14 @@ def _from_blob(blob):
             ctypes.windll.kernel32.LocalFree(blob.pbData)
 
 
-def is_available():
-    return _IS_WINDOWS
-
-
 def encrypt(plaintext):
     """Encrypt a string and return it base64 encoded.
 
     Raises:
-        OSError: if DPAPI is unavailable or the call fails.
+        OSError: if the call fails.
     """
     if not plaintext:
         return ""
-    if not _IS_WINDOWS:
-        raise OSError("DPAPI is only available on Windows.")
 
     data_in, _keep1 = _to_blob(plaintext.encode("utf-8"))
     entropy, _keep2 = _to_blob(_ENTROPY)
@@ -78,10 +67,8 @@ def encrypt(plaintext):
 
 def decrypt(token):
     """Decrypt a base64 token. Returns "" when that is not possible
-    (different user account, corrupted value, other operating system)."""
+    (different user account, corrupted value)."""
     if not token:
-        return ""
-    if not _IS_WINDOWS:
         return ""
 
     try:

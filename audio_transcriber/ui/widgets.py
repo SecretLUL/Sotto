@@ -1063,11 +1063,7 @@ class Scroller(tk.Frame):
         # A bindtag of its own, put in front of those of everything on the
         # page (_claim_wheel), so that the page sees the wheel first.
         self._tag = f"Scroller{id(self)}"
-        sequences = ["<MouseWheel>"]
-        if self.tk.call("tk", "windowingsystem") == "x11":
-            sequences += ["<Button-4>", "<Button-5>"]       # the wheel on X11
-        for sequence in sequences:
-            self.bind_class(self._tag, sequence, self._on_wheel)
+        self.bind_class(self._tag, "<MouseWheel>", self._on_wheel)
 
         self.canvas.bind("<Configure>", self._sync)
         self.body.bind("<Configure>", self._sync)
@@ -1106,8 +1102,7 @@ class Scroller(tk.Frame):
         if isinstance(widget, ttk.Combobox) \
                 and str(widget) == str(self.tk.call("focus")):
             return None                          # it is being used on purpose
-        up = event.num == 4 or event.delta > 0
-        self.canvas.yview_scroll(-1 if up else 1, "units")
+        self.canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
         return "break"
 
 

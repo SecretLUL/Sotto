@@ -308,7 +308,6 @@ class TestRealTranscription(unittest.TestCase):
                             for segment in segments),
                         "timestamps were rounded to whole seconds")
 
-    @unittest.skipUnless(os.name == "nt", "ANSI arguments are a Windows matter")
     def test_input_in_a_non_ansi_folder_with_a_non_ansi_name(self):
         """Turkish and Arabic names made whisper-cli exit with code 2, 'input
         file not found' - on a western Windows it only sees the ANSI form."""

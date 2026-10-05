@@ -139,19 +139,12 @@ class TestAnsiSafePath(unittest.TestCase):
 
     def test_ascii_paths_are_left_alone(self):
         self.assertEqual(
-            paths.ansi_safe_path("C:\\bin\\model.bin", windows=True,
-                                 short_path=self._never),
+            paths.ansi_safe_path("C:\\bin\\model.bin", short_path=self._never),
             "C:\\bin\\model.bin")
-
-    def test_other_platforms_pass_everything_through(self):
-        self.assertEqual(
-            paths.ansi_safe_path(self.TURKISH, windows=False,
-                                 short_path=self._never),
-            self.TURKISH)
 
     def test_uses_the_short_form_when_there_is_one(self):
         self.assertEqual(
-            paths.ansi_safe_path(self.TURKISH, windows=True,
+            paths.ansi_safe_path(self.TURKISH,
                                  short_path=lambda _p: "C:\\Users\\SIRIN~1\\model.bin"),
             "C:\\Users\\SIRIN~1\\model.bin")
 
@@ -163,8 +156,7 @@ class TestAnsiSafePath(unittest.TestCase):
                            lambda _p: self.TURKISH):          # still not ASCII
             with self.subTest(short_path=short_path):
                 self.assertEqual(
-                    paths.ansi_safe_path(self.TURKISH, windows=True,
-                                         short_path=short_path),
+                    paths.ansi_safe_path(self.TURKISH, short_path=short_path),
                     self.TURKISH)
 
 
@@ -184,7 +176,7 @@ class TestResolveDataDir(unittest.TestCase):
 
     def _resolve(self, **overrides):
         options = dict(source_dir=self.SOURCE, frozen=False, executable=self.EXE,
-                       platform="win32", env={}, home=self.HOME,
+                       env={}, home=self.HOME,
                        writable=lambda _directory: True)
         options.update(overrides)
         return paths.resolve_data_dir(**options)
@@ -206,7 +198,7 @@ class TestResolveDataDir(unittest.TestCase):
         self._resolve(frozen=True, source_dir=self.INTERNAL, writable=writable)
         self.assertEqual(probed, [self.APP])
 
-    def test_an_unwritable_folder_falls_back_to_the_profile_on_windows(self):
+    def test_an_unwritable_folder_falls_back_to_the_profile(self):
         local = os.path.join(self.HOME, "AppData", "Local")
         self.assertEqual(
             self._resolve(frozen=True, writable=lambda _d: False,
@@ -216,30 +208,6 @@ class TestResolveDataDir(unittest.TestCase):
         self.assertEqual(
             self._resolve(frozen=True, writable=lambda _d: False),
             os.path.join(self.HOME, "AppData", "Local", "AudioTranscriber"))
-
-    def test_linux_prefers_the_executable_folder_then_follows_xdg(self):
-        self.assertEqual(
-            self._resolve(frozen=True, platform="linux", source_dir=self.INTERNAL),
-            self.APP)
-        data = os.path.join(self.HOME, "data")
-        self.assertEqual(
-            self._resolve(frozen=True, platform="linux", writable=lambda _d: False,
-                          env={"XDG_DATA_HOME": data}),
-            os.path.join(data, "AudioTranscriber"))
-        self.assertEqual(
-            self._resolve(frozen=True, platform="linux", writable=lambda _d: False),
-            os.path.join(self.HOME, ".local", "share", "AudioTranscriber"))
-
-    def test_macos_never_writes_into_the_app_bundle(self):
-        probed = []
-        result = self._resolve(
-            frozen=True, platform="darwin",
-            writable=lambda directory: probed.append(directory) or True)
-        self.assertEqual(
-            result,
-            os.path.join(self.HOME, "Library", "Application Support",
-                         "AudioTranscriber"))
-        self.assertEqual(probed, [], "the bundle must not even be probed")
 
     def test_the_environment_variable_wins_everywhere(self):
         chosen = os.path.abspath(os.path.join("somewhere", "else"))
@@ -269,7 +237,6 @@ class TestWritableProbe(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             self.assertFalse(paths.is_writable(os.path.join(folder, "missing")))
 
-    @unittest.skipUnless(os.name == "nt", "os.access() only misleads on Windows")
     def test_program_files_is_refused_at_once(self):
         """The first version used tempfile, which on Windows retries up to
         10 000 times when os.access() wrongly says the folder is writable:
@@ -411,11 +378,6 @@ class TestMigrateFromAudioTranscriber(unittest.TestCase):
         self.assertEqual(self._migrate(os.path.join(self.root, "Sotto")), [])
         self.assertTrue(os.path.exists(os.path.join(self.old, "bin")))
 
-    def test_the_old_linux_executable_counts_too(self):
-        os.rename(os.path.join(self.old, "AudioTranscriber.exe"),
-                  os.path.join(self.old, "AudioTranscriber"))
-        self.assertIn("bin", self._migrate(os.path.join(self.root, "Sotto")))
-
     def test_nothing_moves_where_sotto_keeps_its_data_elsewhere(self):
         """A read-only install uses the per-user folder, whose name never
         changed - the folder next to it is none of its business."""
@@ -452,7 +414,6 @@ class TestMigrateFromAudioTranscriber(unittest.TestCase):
         self.assertEqual(self._read(self.old, "bin", "ggml-small.bin"), "model")
 
 
-@unittest.skipUnless(os.name == "nt", "8.3 short names are a Windows feature")
 class TestRealShortPath(unittest.TestCase):
     def test_a_non_ascii_location_becomes_ascii_and_stays_the_same_file(self):
         base = tempfile.mkdtemp()
