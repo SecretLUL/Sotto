@@ -66,6 +66,24 @@ class Failed:
     detail: str = ""
 
 
+@dataclass(frozen=True)
+class ModelFetch:
+    """How a download started on the Settings tab is getting on."""
+    model: str
+    step: str             # what is happening, e.g. "Downloading model 'small'…"
+    done: int = 0         # bytes of the current file so far
+    total: int = 0        # its size; 0 while not known (or while unpacking)
+    rate: float = 0.0     # bytes per second
+
+
+@dataclass(frozen=True)
+class ModelFetchEnded:
+    """The download started on the Settings tab is over."""
+    model: str
+    error: str = ""       # empty: the model is ready - or it was cancelled
+    cancelled: bool = False
+
+
 class UiBridge:
     """Thread-safe one-way street from workers to the GUI."""
 

@@ -52,10 +52,12 @@ def model_index(key):
     return 0
 
 
+# Automatic detection first, the languages alphabetically. Settings store the
+# code, never a position, so the order can change freely.
 LANGUAGE_CHOICES = [
-    ("German", "de"), ("English", "en"), ("Detect automatically", "auto"),
-    ("Turkish", "tr"), ("French", "fr"), ("Spanish", "es"),
-    ("Italian", "it"), ("Arabic", "ar"),
+    ("Detect automatically", "auto"),
+    ("Arabic", "ar"), ("English", "en"), ("French", "fr"), ("German", "de"),
+    ("Italian", "it"), ("Spanish", "es"), ("Turkish", "tr"),
 ]
 
 

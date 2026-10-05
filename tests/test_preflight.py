@@ -167,6 +167,13 @@ class TestModels(PreflightCase):
         self.assertEqual(texts(self.check(model="large-v3"), preflight.NOTE), [],
                          "an impossible download is an error, not also a note")
 
+    def test_the_settings_tab_asks_the_same_question_before_a_download(self):
+        self.free[paths.BIN_DIR] = 2 * GB
+        problem = preflight.no_room_for_models(["large-v3"])
+        self.assertIn("3.1 GB", problem)
+        self.assertIn("2.0 GB", problem)
+        self.assertIsNone(preflight.no_room_for_models(["small"]))
+
     def test_every_model_the_app_offers_has_a_known_size(self):
         for name in (name for _label, name in config.MODEL_CHOICES if name):
             with self.subTest(model=name):
