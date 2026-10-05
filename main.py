@@ -9,7 +9,17 @@ import sys
 import traceback
 
 
+# The installer of an update: the new version, started by the old one from
+# its download folder (audio_transcriber/update.py). It replaces the files
+# and has no window of its own.
+UPDATE_FLAG = "--apply-update"
+
+
 def main():
+    if UPDATE_FLAG in sys.argv[1:]:
+        from audio_transcriber import update
+        return update.apply_from_command_line(sys.argv[1:])
+
     if sys.platform == "win32":
         try:
             import ctypes
@@ -49,6 +59,8 @@ def main():
         # short last time. Not in the constructor - the tests build the window
         # too, and a modal question would hang them.
         root.after(400, app.offer_recovery)
+        # Later, and in the background: whether a newer version is out.
+        root.after(1500, app.start_update_check)
         root.mainloop()
     except Exception:
         _fatal("The application could not be started:\n\n"

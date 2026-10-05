@@ -197,6 +197,9 @@ class Button(tk.Canvas):
         icon_name = kw.pop("icon_name", None)
         width = kw.pop("width", None)
         height = kw.pop("height", None)
+        command = kw.pop("command", None)
+        if command is not None:
+            self._command = command
         if state is not None:
             self._state = str(state)
             self._hover = self._pressed = False

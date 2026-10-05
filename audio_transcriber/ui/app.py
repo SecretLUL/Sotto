@@ -12,6 +12,7 @@ import os
 import threading
 import time
 import tkinter as tk
+import webbrowser
 from dataclasses import asdict
 from tkinter import filedialog, messagebox, ttk
 
@@ -23,12 +24,13 @@ try:
 except ImportError:
     import pyaudio
 
-from .. import config, paths, pipeline, preflight
+from .. import config, paths, pipeline, preflight, update, version
 from ..audio import capture
 from ..audio import devices as devmod
 from ..audio.capture import AudioEngine
 from ..events import (Failed, Finished, LivePreview, Log, ModelFetch,
-                      ModelFetchEnded, Progress, Status, UiBridge)
+                      ModelFetchEnded, Progress, Status, UiBridge,
+                      UpdateChecked, UpdateFetch, UpdateFetchEnded)
 from ..transcribe import binaries
 from ..transcribe.base import format_clock
 from . import chrome, dialogs, icons
@@ -96,6 +98,16 @@ class RecorderApp:
         self._shutting_down = False
         self._meter_after_id = None
         self._icon_refs = {}
+        # Updates. The tag this build was made for; None when run from source,
+        # which never looks for one.
+        self._installed = version.current()
+        self._update_release = None      # a newer update.Release, once found
+        self._update_checking = False
+        self._update_download = None     # the UpdateDownload while it runs
+        self._update_staged = None       # the unpacked new version, ready
+        self._update_error = None        # why the last download failed
+        self._update_dismissed = False   # "Later": no banner this session
+        self._installer_started = False
 
         paths.ensure_dirs()
         self._build()
@@ -143,6 +155,7 @@ class RecorderApp:
         outer.pack(fill=tk.BOTH, expand=True, padx=T.XL, pady=(T.LG, T.LG))
 
         self._build_header(outer)
+        self._build_update_banner(outer)
 
         # The order of work: record, read, and now and then adjust.
         self.notebook = W.Tabs(outer)
@@ -173,6 +186,7 @@ class RecorderApp:
         self._build_ai(settings_container)
         self._build_output_folder(settings_container)
         self._build_options_card(settings_container)
+        self._build_updates_card(settings_container)
         self._build_settings_footer(settings_container)
         self._refresh_subtitle()
 
@@ -219,6 +233,53 @@ class RecorderApp:
                                     width=120, height=32,
                                     command=self.offer_recovery)
         self.recover_btn.grid(row=0, column=1, padx=(T.MD, 0))
+
+    # ------------------------------------------------------------------
+    def _build_update_banner(self, parent):
+        """A line under the header while a new version is out.
+
+        Above the tabs, so it is seen whichever tab is open. Built but not
+        packed: _refresh_update_banner() shows it when there is something to
+        say. One action button and a "Later"; what they do follows the state
+        of the update.
+        """
+        self.update_banner = W.Card(parent)
+        body = self.update_banner.body
+        body.columnconfigure(1, weight=1)
+        self.update_banner_badge = W.IconBadge(body, "refresh", T.ACCENT)
+        self.update_banner_badge.grid(row=0, column=0, rowspan=2, sticky="nw",
+                                      padx=(0, T.MD), pady=(T.px(2), 0))
+        self.update_title = tk.Label(body, bg=T.CARD, fg=T.TEXT,
+                                     font=T.fonts["body_bold"], anchor="w")
+        self.update_title.grid(row=0, column=1, sticky="w")
+        self.update_detail = W.WrapLabel(body, font=T.fonts["small"])
+        self.update_detail.grid(row=1, column=1, sticky="ew", pady=(T.px(2), 0))
+
+        buttons = tk.Frame(body, bg=T.CARD)
+        buttons.grid(row=0, column=2, rowspan=2, sticky="e", padx=(T.MD, 0))
+        self.update_notes_btn = W.Button(buttons, text="What's new", kind="quiet",
+                                         width=100, height=34,
+                                         command=self._open_release_page)
+        self.update_action_btn = W.Button(buttons, text="Update now",
+                                          icon_name="save", kind="accent",
+                                          width=130, height=34)
+        self.update_action_btn.pack(side=tk.LEFT)
+        self.update_later_btn = W.Button(buttons, text="Later", kind="quiet",
+                                         width=70, height=34,
+                                         command=self._dismiss_update)
+
+        # Only while the download runs.
+        self.update_progress = tk.Frame(body, bg=T.CARD)
+        self.update_progress.grid(row=2, column=1, columnspan=2, sticky="ew",
+                                  pady=(T.SM, 0))
+        self.update_progress.columnconfigure(0, weight=1)
+        self.update_bar = W.ProgressBar(self.update_progress)
+        self.update_bar.grid(row=0, column=0, sticky="ew")
+        self.update_percent = tk.Label(self.update_progress, bg=T.CARD,
+                                       fg=T.TEXT_DIM, font=T.fonts["mono_small"],
+                                       width=6, anchor="e")
+        self.update_percent.grid(row=0, column=1, sticky="e", padx=(T.SM, 0))
+        self.update_progress.grid_remove()
 
     # ------------------------------------------------------------------
     def _build_sources(self, parent):
@@ -458,6 +519,44 @@ class RecorderApp:
             W.WrapLabel(tile, text=text).pack(fill=tk.X, padx=(indent, 0),
                                                pady=(T.px(2), 0))
 
+    def _build_updates_card(self, parent):
+        """Which version this is, whether there is a newer one, and the switch
+        for asking at every start.
+
+        A slim line rather than a card: with one more card the Settings tab no
+        longer fitted a window of the usual size and had to scroll.
+        """
+        row = tk.Frame(parent, bg=T.BG)
+        row.pack(fill=tk.X, pady=(0, T.MD))
+        row.columnconfigure(1, weight=1)
+
+        self.update_badge = W.IconBadge(row, "refresh", T.TEXT_MUTE, bg=T.BG)
+        self.update_badge.grid(row=0, column=0, rowspan=2, sticky="w",
+                               padx=(T.XS, T.MD))
+        tk.Label(row, bg=T.BG, fg=T.TEXT, font=T.fonts["body_bold"], anchor="w",
+                 text=f"Sotto {self._installed}" if self._installed
+                 else "Sotto, from source").grid(row=0, column=1, sticky="sw")
+        self.update_info = W.WrapLabel(row, bg=T.BG)
+        self.update_info.grid(row=1, column=1, sticky="new")
+
+        controls = tk.Frame(row, bg=T.BG)
+        controls.grid(row=0, column=2, rowspan=2, sticky="e", padx=(T.MD, 0))
+        self.update_auto_var = tk.BooleanVar(value=self.settings.check_for_updates)
+        W.Switch(controls, "Check for updates at start", self.update_auto_var,
+                 bg=T.BG).pack(side=tk.LEFT, padx=(0, T.LG))
+        self.update_check_btn = W.Button(
+            controls, text="Check now", icon_name="refresh", kind="ghost",
+            bg=T.BG, width=120, height=34,
+            state="normal" if self._installed else "disabled",
+            command=lambda: self.check_for_updates(manual=True))
+        self.update_check_btn.pack(side=tk.LEFT)
+
+        if self._installed:
+            self._show_update_info("Not checked yet. Nothing is downloaded "
+                                   "until you say so.")
+        else:
+            self._show_update_info(update.install_problem())
+
     def _build_settings_footer(self, parent):
         footer = tk.Frame(parent, bg=T.BG)
         footer.pack(fill=tk.X, pady=(0, T.SM))
@@ -572,6 +671,9 @@ class RecorderApp:
         self.bridge.on(Failed, self._on_failed)
         self.bridge.on(ModelFetch, self._on_model_fetch)
         self.bridge.on(ModelFetchEnded, self._on_model_fetch_ended)
+        self.bridge.on(UpdateChecked, self._on_update_checked)
+        self.bridge.on(UpdateFetch, self._on_update_fetch)
+        self.bridge.on(UpdateFetchEnded, self._on_update_fetch_ended)
         # A recording may have fetched the model in the meantime.
         self.notebook.bind("<<NotebookTabChanged>>",
                            lambda _e: self._refresh_model_state())
@@ -1086,6 +1188,7 @@ class RecorderApp:
         settings.use_vad = bool(self.vad_var.get())
         settings.use_gpu = bool(self.gpu_var.get())
         settings.keep_raw_tracks = bool(self.keep_raw_var.get())
+        settings.check_for_updates = bool(self.update_auto_var.get())
         settings.filename = paths.safe_output_name(self.filename_entry.get())
         raw_out = self.output_dir_entry.get().strip()
         settings.output_dir = "" if raw_out == paths.OUT_DIR else raw_out
@@ -1330,6 +1433,191 @@ class RecorderApp:
             self.sys_meter.set_level(self.engine.sys_level * gain_factor)
 
     # ==================================================================
+    # Updates
+    # ==================================================================
+    def start_update_check(self):
+        """Once the window is up (main.py): how the last update went, then ask
+        GitHub. Not in the constructor - the tests build the window too, and
+        must not go on the network."""
+        if self._shutting_down or self._installed is None:
+            return
+        if update.install_problem() is None:
+            self._report_update_result(update.take_result())
+            threading.Thread(target=update.cleanup, name="update-cleanup",
+                             daemon=True).start()
+        if self.settings.check_for_updates:
+            self.check_for_updates()
+
+    def _report_update_result(self, result):
+        """Say how the update installed at the last close or restart went."""
+        if not result:
+            return
+        if result["ok"]:
+            self.transcript.append(f"✓ Sotto was updated to {self._installed}.\n")
+            self.status.set(f"updated to {self._installed}", T.OK)
+        else:
+            self.transcript.append(
+                f"⚠ The update to {result['tag']} could not be installed: "
+                f"{result['error']} Sotto is still {self._installed}.\n")
+            self.status.set("update failed", T.WARN)
+
+    def check_for_updates(self, manual=False):
+        """Ask GitHub for a newer release, in the background."""
+        if (self._installed is None or self._update_checking
+                or self._update_download is not None
+                or self._update_staged is not None):
+            return
+        self._update_checking = True
+        if manual:
+            self._update_dismissed = False
+        self.update_check_btn.config(state="disabled")
+        self._show_update_info("Checking…")
+        update.UpdateCheck(self.bridge, self._installed).start()
+
+    def _on_update_checked(self, event):
+        self._update_checking = False
+        self.update_check_btn.config(state="normal")
+        if event.error:
+            self._show_update_info(f"Could not check for updates: {event.error}",
+                                   T.WARN, "warning")
+            return
+        if event.release is None:
+            self._show_update_info("This is the newest version.", T.OK, "check")
+            return
+        self._update_release = event.release
+        self._update_error = None
+        self._show_update_info(f"Sotto {event.release.tag} is available.",
+                               T.ACCENT)
+        self._refresh_update_banner()
+
+    def _show_update_info(self, text, colour=T.TEXT_MUTE, icon_name="refresh"):
+        """The line on the Updates card in Settings."""
+        self.update_info.config(text=text)
+        self.update_badge.set(icon_name, colour)
+
+    def _refresh_update_banner(self):
+        """Show the banner in the state the update is in - or hide it."""
+        release = self._update_release
+        if release is None or self._update_dismissed:
+            self.update_banner.pack_forget()
+            return
+        self.update_progress.grid_remove()
+        problem = update.install_problem()
+
+        if self._update_download is not None:
+            self._banner("save", T.ACCENT, f"Downloading Sotto {release.tag}…",
+                         "Connecting…", "Cancel", self._cancel_update_download,
+                         kind="ghost", icon_name="stop", later=False)
+            self.update_bar.set(None)
+            self.update_percent.config(text="")
+            self.update_progress.grid()
+        elif self._update_staged is not None:
+            self._banner("check", T.OK, f"Sotto {release.tag} is ready to install",
+                         "Restart Sotto to finish - it takes a few seconds. Or "
+                         "carry on: the update is installed when you close Sotto.",
+                         "Restart now", self.restart_to_update, icon_name="refresh")
+        elif self._update_error is not None:
+            self._banner("warning", T.DANGER, "The update could not be downloaded",
+                         self._update_error, "Try again", self._start_update_download,
+                         icon_name="refresh")
+        elif problem is not None:
+            self._banner("refresh", T.ACCENT, f"Sotto {release.tag} is available",
+                         f"You have {self._installed}. {problem}", "Download",
+                         self._open_release_page)
+        else:
+            self._banner("refresh", T.ACCENT, f"Sotto {release.tag} is available",
+                         f"You have {self._installed}. The update downloads in the "
+                         f"background; your recordings, models and settings stay "
+                         f"as they are.", "Update now", self._start_update_download,
+                         notes=True)
+        self.update_banner.pack(fill=tk.X, pady=(0, T.MD), before=self.notebook)
+
+    def _banner(self, badge, colour, title, detail, action, command,
+                kind="accent", icon_name="save", notes=False, later=True):
+        """Fill the banner: its badge, its text, and which buttons it shows."""
+        self.update_banner_badge.set(badge, colour)
+        self.update_title.config(text=title)
+        self.update_detail.config(text=detail)
+        self.update_action_btn.config(text=action, kind=kind, command=command,
+                                      icon_name=icon_name, state="normal")
+        self.update_notes_btn.pack_forget()
+        self.update_later_btn.pack_forget()
+        if notes:
+            self.update_notes_btn.pack(side=tk.LEFT, padx=(0, T.XS),
+                                       before=self.update_action_btn)
+        if later:
+            self.update_later_btn.pack(side=tk.LEFT, padx=(T.XS, 0))
+
+    def _start_update_download(self):
+        release = self._update_release
+        if release is None or self._update_download is not None:
+            return
+        self._update_error = None
+        self._update_download = update.UpdateDownload(self.bridge, release,
+                                                      update.workspace())
+        self._refresh_update_banner()
+        self._update_download.start()
+
+    def _cancel_update_download(self):
+        if self._update_download is not None:
+            self._update_download.cancel()
+            self.update_title.config(text="Cancelling…")
+            self.update_action_btn.config(state="disabled")
+
+    def _on_update_fetch(self, event):
+        download = self._update_download
+        if download is None or download.cancelled:
+            return
+        if event.step:
+            self.update_title.config(text=event.step)
+        if event.total:
+            fraction = min(1.0, event.done / event.total)
+            self.update_bar.set(fraction)
+            self.update_percent.config(text=f"{fraction * 100:.0f} %")
+        else:                                # checksums, verifying, unpacking
+            self.update_bar.set(None)
+            self.update_percent.config(text="")
+        self.update_detail.config(text=_transfer_text(event) if event.done else "")
+
+    def _on_update_fetch_ended(self, event):
+        self._update_download = None
+        if event.error:
+            self._update_error = event.error
+            self.status.set("update download failed", T.DANGER)
+        elif event.staged:
+            self._update_staged = event.staged
+            self.status.set(f"{event.tag} ready to install", T.OK)
+        self._refresh_update_banner()
+
+    def restart_to_update(self):
+        """Quit, let the installer swap the files, and start the new version."""
+        if self._update_staged is None:
+            return
+        if self._busy_with_work():
+            messagebox.showinfo(
+                "Update",
+                "A recording is being made or processed. Restart once it is "
+                "done - or simply close Sotto then: the update is installed on "
+                "the way out.")
+            return
+        try:
+            update.start_install(self._update_staged, relaunch=True)
+        except OSError as exc:
+            messagebox.showerror("Update", f"The update could not be started:\n{exc}")
+            return
+        self._installer_started = True
+        self.on_close()
+
+    def _dismiss_update(self):
+        """'Later': no banner for the rest of this session."""
+        self._update_dismissed = True
+        self._refresh_update_banner()
+
+    def _open_release_page(self):
+        release = self._update_release
+        webbrowser.open(release.page_url if release else update.RELEASES_PAGE)
+
+    # ==================================================================
     # Ticker
     # ==================================================================
     def _tick(self):
@@ -1346,6 +1634,7 @@ class RecorderApp:
         self.sys_meter.set_level(self.engine.sys_level * sys_gain)
         self.status.tick(METER_INTERVAL_MS / 1000.0)
         self.model_bar.tick(METER_INTERVAL_MS / 1000.0)
+        self.update_bar.tick(METER_INTERVAL_MS / 1000.0)
         now = time.monotonic()
         if now - self._save_checked_at >= SAVE_CHECK_INTERVAL_S:
             self._save_checked_at = now
@@ -1411,6 +1700,8 @@ class RecorderApp:
             self._prefetch.cancel()
         if self._model_download is not None:
             self._model_download.cancel()
+        if self._update_download is not None:
+            self._update_download.cancel()
         if self.finalizer is not None:
             self.finalizer.cancel()
 
@@ -1422,6 +1713,14 @@ class RecorderApp:
             self.pa.terminate()
         except Exception:
             pass
+
+        # A downloaded update that was not installed with "Restart now" is
+        # installed on the way out; the installer waits for this process to end.
+        if self._update_staged is not None and not self._installer_started:
+            try:
+                update.start_install(self._update_staged, relaunch=False)
+            except OSError:
+                pass                     # the next start clears it away
 
         self.root.destroy()
 
