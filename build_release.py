@@ -21,10 +21,12 @@ import sys
 import tarfile
 import zipfile
 
-# The executable, the archives and the folder they unpack to keep the name from
+# The executable and the folder the archive unpacks to keep the name from
 # before Sotto: models, recordings and settings.json live in that folder, and an
-# update unpacked over it has to find them there.
+# update unpacked over it has to find them there. Only the archive itself is
+# free to carry the new name.
 APP_NAME = "AudioTranscriber"
+ARCHIVE_NAME = "Sotto"
 FALLBACK_VERSION = "v0.0.0-dev"
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -249,7 +251,7 @@ def create_archive(archive_path, suffix):
 def main():
     version = resolve_version()
     suffix, slug = platform_tag()
-    archive_name = f"{APP_NAME}-{version}-{slug}.{suffix}"
+    archive_name = f"{ARCHIVE_NAME}-{version}-{slug}.{suffix}"
     archive_path = os.path.join(DIST_DIR, archive_name)
 
     print(f"--- Building {APP_NAME} {version} for {slug} ---")

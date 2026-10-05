@@ -193,8 +193,8 @@ jobs:
         with:
           name: ${{ matrix.artifact }}-release-package
           path: |
-            dist/AudioTranscriber-*.zip
-            dist/AudioTranscriber-*.tar.gz
+            dist/Sotto-*.zip
+            dist/Sotto-*.tar.gz
           if-no-files-found: error
 
   publish:
@@ -263,11 +263,11 @@ jobs:
 
           | System | File |
           | :--- | :--- |
-          | Windows 10/11, x64 | \`AudioTranscriber-$TAG-windows-x64.zip\` |
-          | Linux, x64 | \`AudioTranscriber-$TAG-linux-x64.tar.gz\` |
-          | macOS, Apple Silicon | \`AudioTranscriber-$TAG-macos-arm64.zip\` |
+          | Windows 10/11, x64 | \`Sotto-$TAG-windows-x64.zip\` |
+          | Linux, x64 | \`Sotto-$TAG-linux-x64.tar.gz\` |
+          | macOS, Apple Silicon | \`Sotto-$TAG-macos-arm64.zip\` |
 
-          Extract the archive and start \`AudioTranscriber\`. Recording the system audio on macOS needs a loopback driver such as [BlackHole](https://github.com/ExistentialAudio/BlackHole); on an Intel Mac, run Sotto from source. \`SHA256SUMS.txt\` lists the checksum of every file.
+          Extract the archive and start \`AudioTranscriber\` in the folder it unpacks to. Recording the system audio on macOS needs a loopback driver such as [BlackHole](https://github.com/ExistentialAudio/BlackHole); on an Intel Mac, run Sotto from source. \`SHA256SUMS.txt\` lists the checksum of every file.
           EOF
 
       - name: Publish the release

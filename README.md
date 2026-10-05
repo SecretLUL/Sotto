@@ -21,13 +21,13 @@ Sotto records your microphone and the system audio as two separate tracks and tu
 
 ## Download
 
-Get the archive for your system from the [latest release](https://github.com/SecretLUL/Sotto/releases/latest), extract it and start `AudioTranscriber`.
+Get the archive for your system from the [latest release](https://github.com/SecretLUL/Sotto/releases/latest), extract it and start `AudioTranscriber` in the folder it unpacks to.
 
 | System | Archive | System audio |
 | :--- | :--- | :--- |
-| Windows 10/11, x64 | `AudioTranscriber-<version>-windows-x64.zip` | WASAPI loopback, built in |
-| Linux, x64 | `AudioTranscriber-<version>-linux-x64.tar.gz` | PulseAudio or PipeWire monitor |
-| macOS, Apple Silicon | `AudioTranscriber-<version>-macos-arm64.zip` | a loopback driver such as [BlackHole](https://github.com/ExistentialAudio/BlackHole) |
+| Windows 10/11, x64 | `Sotto-<version>-windows-x64.zip` | WASAPI loopback, built in |
+| Linux, x64 | `Sotto-<version>-linux-x64.tar.gz` | PulseAudio or PipeWire monitor |
+| macOS, Apple Silicon | `Sotto-<version>-macos-arm64.zip` | a loopback driver such as [BlackHole](https://github.com/ExistentialAudio/BlackHole) |
 
 - On Windows the whisper.cpp engine is downloaded automatically. On Linux and macOS, install it so that `whisper-cli` is on the `PATH` (macOS: `brew install whisper-cpp`), or use ElevenLabs.
 - On an Intel Mac, run from source or build with `python build_release.py`.
