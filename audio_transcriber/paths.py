@@ -28,6 +28,10 @@ import uuid
 # Renaming it would leave every user's models and settings behind.
 APP_NAME = "AudioTranscriber"
 
+# The folder and the executable of a packaged build from before Sotto. A
+# portable install of one keeps its data in that folder (migrate_legacy_data).
+LEGACY_INSTALL_NAME = "AudioTranscriber"
+
 # Names the data directory explicitly - portable installs, tests, CI.
 HOME_ENV = "AUDIO_TRANSCRIBER_HOME"
 
@@ -172,45 +176,81 @@ def ensure_dirs():
         os.makedirs(directory, exist_ok=True)
 
 
-def migrate_legacy_data(source_dir=None, data_dir=None, frozen=None):
-    """Move what an older packaged build left in _internal to the data directory.
+def migrate_legacy_data(source_dir=None, data_dir=None, frozen=None,
+                        executable=None):
+    """Move what an older packaged build left behind to the data directory.
 
-    Those builds kept bin/ (the multi-GB models), output/ and settings.json
-    inside PyInstaller's _internal folder. A version that looks next to the
-    executable instead would make all of it look lost - including a 3 GB model
-    that would be downloaded again - so it is moved over, once, before anything
-    reads or creates files there.
+    From two places (_legacy_sources):
+      * PyInstaller's _internal folder. Older builds kept bin/ (the multi-GB
+        models), output/ and settings.json there.
+      * A portable install from before Sotto, whose folder and executable were
+        called AudioTranscriber - Sotto unpacked next to it or into it. Only
+        where Sotto itself keeps its data next to the executable.
+    Either way a 3 GB model would look lost and be downloaded again, so it is
+    moved over, once, before anything reads or creates files there.
 
     Moving is a rename: instant even for the models, and it cannot leave a
-    half-copied model behind. Where a rename is not possible (another drive)
-    the data simply stays where it is. Nothing is ever overwritten; an empty
-    placeholder directory is replaced. Does nothing outside a packaged build.
+    half-copied model behind. Where a rename is not possible (another drive,
+    the old version still running) the data simply stays where it is. Nothing
+    is ever overwritten; an empty placeholder directory is replaced. Does
+    nothing outside a packaged build.
 
     Returns the names that were moved.
     """
     source_dir = SOURCE_DIR if source_dir is None else source_dir
     data_dir = DATA_DIR if data_dir is None else data_dir
     frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
-    if not frozen or _same_directory(source_dir, data_dir):
+    executable = sys.executable if executable is None else executable
+    if not frozen:
         return []
 
     moved = []
-    for name in LEGACY_ITEMS:
-        old = os.path.join(source_dir, name)
-        new = os.path.join(data_dir, name)
-        if not os.path.exists(old):
-            continue
-        try:
-            if os.path.exists(new):
-                if not _is_empty_dir(new):
-                    continue
-                os.rmdir(new)
-            os.makedirs(data_dir, exist_ok=True)
-            os.rename(old, new)
-        except OSError:
-            continue
-        moved.append(name)
+    for source in _legacy_sources(source_dir, data_dir, executable):
+        for name in LEGACY_ITEMS:
+            if _move_item(source, data_dir, name) and name not in moved:
+                moved.append(name)
     return moved
+
+
+def _legacy_sources(source_dir, data_dir, executable):
+    """Where an older build may have left data, in the order they are tried."""
+    sources = [source_dir]
+    beside_executable = os.path.dirname(os.path.abspath(executable))
+    if _same_directory(beside_executable, data_dir):
+        # Sotto unpacked next to the old folder, or into it.
+        parent = os.path.dirname(beside_executable)
+        sources += [candidate for candidate in
+                    (os.path.join(parent, LEGACY_INSTALL_NAME), parent)
+                    if _is_legacy_install(candidate)]
+    return [source for source in sources if not _same_directory(source, data_dir)]
+
+
+def _is_legacy_install(directory):
+    """True for the folder of a packaged build from before Sotto.
+
+    Recognised by its executable, so that a folder that merely holds a bin/ or
+    an output/ of its own is left alone.
+    """
+    return any(os.path.isfile(os.path.join(directory, LEGACY_INSTALL_NAME + suffix))
+               for suffix in (".exe", ""))
+
+
+def _move_item(source, data_dir, name):
+    """Move source/name into data_dir, unless something is there already."""
+    old = os.path.join(source, name)
+    new = os.path.join(data_dir, name)
+    if not os.path.exists(old):
+        return False
+    try:
+        if os.path.exists(new):
+            if not _is_empty_dir(new):
+                return False
+            os.rmdir(new)
+        os.makedirs(data_dir, exist_ok=True)
+        os.rename(old, new)
+    except OSError:
+        return False
+    return True
 
 
 def _same_directory(first, second):

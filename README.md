@@ -21,7 +21,7 @@ Sotto records your microphone and the system audio as two separate tracks and tu
 
 ## Download
 
-Get the archive for your system from the [latest release](https://github.com/SecretLUL/Sotto/releases/latest), extract it and start `AudioTranscriber` in the folder it unpacks to.
+Get the archive for your system from the [latest release](https://github.com/SecretLUL/Sotto/releases/latest), extract it and start `Sotto`.
 
 | System | Archive | System audio |
 | :--- | :--- | :--- |
@@ -32,6 +32,7 @@ Get the archive for your system from the [latest release](https://github.com/Sec
 - On Windows the whisper.cpp engine is downloaded automatically. On Linux and macOS, install it so that `whisper-cli` is on the `PATH` (macOS: `brew install whisper-cpp`), or use ElevenLabs.
 - On an Intel Mac, run from source or build with `python build_release.py`.
 - Models (`bin/`), recordings (`output/`) and `settings.json` are kept next to the executable. Where that folder is not writable, and always on macOS, they go to `%LOCALAPPDATA%\AudioTranscriber`, `~/Library/Application Support/AudioTranscriber` or `~/.local/share/AudioTranscriber`. `AUDIO_TRANSCRIBER_HOME` overrides this.
+- Coming from 2.0 or older, whose folder was called `AudioTranscriber`: extract Sotto next to that folder or into it. On its first start Sotto moves the models, recordings and settings over.
 
 ## Run from source
 

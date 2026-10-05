@@ -177,9 +177,9 @@ class TestResolveDataDir(unittest.TestCase):
     """
 
     SOURCE = os.path.abspath(os.path.join("checkout", "Audio-Transcriber"))
-    APP = os.path.abspath(os.path.join("apps", "AudioTranscriber"))
+    APP = os.path.abspath(os.path.join("apps", "Sotto"))
     INTERNAL = os.path.join(APP, "_internal")
-    EXE = os.path.join(APP, "AudioTranscriber.exe")
+    EXE = os.path.join(APP, "Sotto.exe")
     HOME = os.path.abspath(os.path.join("users", "me"))
 
     def _resolve(self, **overrides):
@@ -295,7 +295,7 @@ class TestMigrateLegacyData(unittest.TestCase):
     next to the executable must not make a 3 GB model look lost."""
 
     def setUp(self):
-        self.data = os.path.join(tempfile.mkdtemp(), "AudioTranscriber")
+        self.data = os.path.join(tempfile.mkdtemp(), "Sotto")
         self.internal = os.path.join(self.data, "_internal")
         self._write(self.internal, "settings.json", "{}")
         self._write(self.internal, os.path.join("bin", "ggml-small.bin"), "model")
@@ -366,6 +366,90 @@ class TestMigrateLegacyData(unittest.TestCase):
     def test_the_real_defaults_leave_a_source_checkout_alone(self):
         """Running from source (as the tests do) must never move anything."""
         self.assertEqual(paths.migrate_legacy_data(), [])
+
+
+class TestMigrateFromAudioTranscriber(unittest.TestCase):
+    """Until 2.0 the folder and the executable were called AudioTranscriber. A
+    portable install keeps its data in that folder; Sotto, unpacked next to it
+    or into it, would otherwise start without models and settings."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.old = os.path.join(self.root, "AudioTranscriber")
+        self._write(self.old, "AudioTranscriber.exe", "")
+        self._write(self.old, "settings.json", "{}")
+        self._write(self.old, os.path.join("bin", "ggml-small.bin"), "model")
+        self._write(self.old, os.path.join("output", "meeting.txt"), "text")
+
+    _write = staticmethod(TestMigrateLegacyData._write)
+    _read = staticmethod(TestMigrateLegacyData._read)
+
+    def _migrate(self, app_dir, **overrides):
+        options = dict(source_dir=os.path.join(app_dir, "_internal"),
+                       data_dir=app_dir, frozen=True,
+                       executable=os.path.join(app_dir, "Sotto.exe"))
+        options.update(overrides)
+        return paths.migrate_legacy_data(**options)
+
+    def test_sotto_next_to_the_old_folder_takes_its_data(self):
+        new = os.path.join(self.root, "Sotto")
+        self.assertEqual(self._migrate(new), ["settings.json", "bin", "output"])
+        self.assertEqual(self._read(new, "bin", "ggml-small.bin"), "model")
+        self.assertEqual(self._read(new, "output", "meeting.txt"), "text")
+        self.assertEqual(self._read(new, "settings.json"), "{}")
+        for name in paths.LEGACY_ITEMS:
+            self.assertFalse(os.path.exists(os.path.join(self.old, name)), name)
+
+    def test_sotto_unpacked_into_the_old_folder_takes_its_data(self):
+        new = os.path.join(self.old, "Sotto")
+        self.assertEqual(self._migrate(new), ["settings.json", "bin", "output"])
+        self.assertEqual(self._read(new, "bin", "ggml-small.bin"), "model")
+
+    def test_a_folder_without_the_old_executable_is_left_alone(self):
+        os.remove(os.path.join(self.old, "AudioTranscriber.exe"))
+        self.assertEqual(self._migrate(os.path.join(self.root, "Sotto")), [])
+        self.assertTrue(os.path.exists(os.path.join(self.old, "bin")))
+
+    def test_the_old_linux_executable_counts_too(self):
+        os.rename(os.path.join(self.old, "AudioTranscriber.exe"),
+                  os.path.join(self.old, "AudioTranscriber"))
+        self.assertIn("bin", self._migrate(os.path.join(self.root, "Sotto")))
+
+    def test_nothing_moves_where_sotto_keeps_its_data_elsewhere(self):
+        """A read-only install uses the per-user folder, whose name never
+        changed - the folder next to it is none of its business."""
+        new = os.path.join(self.root, "Sotto")
+        per_user = os.path.join(self.root, "profile", "AudioTranscriber")
+        self.assertEqual(self._migrate(new, data_dir=per_user), [])
+        self.assertTrue(os.path.exists(os.path.join(self.old, "bin")))
+
+    def test_what_sotto_has_already_is_never_overwritten(self):
+        new = os.path.join(self.root, "Sotto")
+        self._write(new, "settings.json", '{"new": true}')
+        self.assertEqual(self._migrate(new), ["bin", "output"])
+        self.assertEqual(self._read(new, "settings.json"), '{"new": true}')
+        self.assertEqual(self._read(self.old, "settings.json"), "{}")
+
+    def test_internal_comes_first_and_the_old_folder_fills_in(self):
+        new = os.path.join(self.root, "Sotto")
+        self._write(os.path.join(new, "_internal"), "settings.json", '{"internal": 1}')
+        self.assertEqual(self._migrate(new), ["settings.json", "bin", "output"])
+        self.assertEqual(self._read(new, "settings.json"), '{"internal": 1}')
+        self.assertEqual(self._read(new, "bin", "ggml-small.bin"), "model")
+
+    def test_a_folder_that_was_renamed_back_is_not_its_own_source(self):
+        """Sotto in a folder called AudioTranscriber: the 'old folder next to
+        it' is itself, and there is nothing to move."""
+        self._write(self.old, "Sotto.exe", "")
+        self.assertEqual(self._migrate(self.old), [])
+        self.assertEqual(self._read(self.old, "bin", "ggml-small.bin"), "model")
+
+    def test_a_running_old_version_keeps_its_data_and_nothing_raises(self):
+        with patch("audio_transcriber.paths.os.rename",
+                   side_effect=OSError("in use")):
+            self.assertEqual(self._migrate(os.path.join(self.root, "Sotto")), [])
+        self.assertEqual(self._read(self.old, "bin", "ggml-small.bin"), "model")
 
 
 @unittest.skipUnless(os.name == "nt", "8.3 short names are a Windows feature")
