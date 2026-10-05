@@ -14,18 +14,19 @@ Version resolution, highest priority first:
 """
 
 import os
-import platform
 import shutil
 import subprocess
 import sys
 import tarfile
 import zipfile
 
+from audio_transcriber import version as app_version
+
 # The executable, the archives and the folder they unpack to. Builds from before
 # Sotto were called AudioTranscriber; a portable install of one keeps its models,
 # recordings and settings.json in that folder, and Sotto moves them over on its
 # first start (paths.migrate_legacy_data).
-APP_NAME = "Sotto"
+APP_NAME = app_version.APP_NAME
 FALLBACK_VERSION = "v0.0.0-dev"
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -90,17 +91,12 @@ def _normalize_version(value):
 
 
 def platform_tag():
-    """(archive suffix, platform slug) for the current OS."""
-    if sys.platform == "win32":
-        return "zip", "windows-x64"
-    if sys.platform == "darwin":
-        # Not "universal": PyInstaller builds for the host architecture only
-        # unless target_arch=universal2 is set explicitly, so an arm64 runner
-        # produces an arm64-only binary. Naming it universal promised Intel
-        # users a build that would not run for them.
-        machine = platform.machine().lower()
-        return "zip", "macos-arm64" if machine in ("arm64", "aarch64") else "macos-x64"
-    return "tar.gz", "linux-x64"
+    """(archive suffix, platform slug) for the current OS.
+
+    Defined in the app (version.py): the updater looks for its download under
+    the very name this build gives it.
+    """
+    return app_version.platform_tag()
 
 
 # ----------------------------------------------------------------------
@@ -139,7 +135,21 @@ def write_icon():
     return path
 
 
-def build_exe(icon=None):
+def write_release_file(version):
+    """The version file the app reads (version.current()), for the bundle.
+
+    It is how a build knows which release it is - and so whether a newer one
+    is out. Kept apart from build/Sotto, which PyInstaller --clean empties.
+    """
+    folder = os.path.join(BUILD_DIR, "release")
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, os.path.basename(app_version.RELEASE_FILE))
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(version + "\n")
+    return path
+
+
+def build_exe(icon=None, release_file=None):
     """Run PyInstaller to build the standalone executable directory."""
     print("Building executable with PyInstaller...")
 
@@ -157,6 +167,9 @@ def build_exe(icon=None):
     ]
     if icon:
         cmd += ["--icon", icon]
+    if release_file:
+        # Next to the package's modules, where version.py looks for it.
+        cmd += ["--add-data", f"{release_file}{os.pathsep}audio_transcriber"]
 
     # Only Windows has the WASAPI loopback fork; elsewhere plain PyAudio is
     # used and ui/app.py falls back to it at import time.
@@ -214,6 +227,11 @@ def verify_bundle():
     missing = [f"{name} - {why}" for name, why in required.items()
                if not any(entry.split(".")[0] == name or entry.startswith(name + "-")
                           for entry in entries)]
+    release = os.path.join(internal_dir, "audio_transcriber",
+                           os.path.basename(app_version.RELEASE_FILE))
+    if not os.path.isfile(release):
+        missing.append("audio_transcriber/RELEASE - the version, without which "
+                       "the build cannot tell whether an update is out")
     if missing:
         print("ERROR: the bundle is missing modules the app imports at startup:")
         for item in missing:
@@ -255,7 +273,7 @@ def main():
 
     print(f"--- Building {APP_NAME} {version} for {slug} ---")
     clean()
-    build_exe(icon=write_icon())
+    build_exe(icon=write_icon(), release_file=write_release_file(version))
     prune_unneeded()
     verify_bundle()
     create_archive(archive_path, suffix)

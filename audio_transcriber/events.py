@@ -84,6 +84,31 @@ class ModelFetchEnded:
     cancelled: bool = False
 
 
+@dataclass(frozen=True)
+class UpdateChecked:
+    """The check for a new version is done."""
+    release: object = None    # an update.Release when a newer one is out
+    error: str = ""           # why it could not be checked
+
+
+@dataclass(frozen=True)
+class UpdateFetch:
+    """How the download of an update is getting on."""
+    step: str             # e.g. "Downloading Sotto v2.1.0…"
+    done: int = 0
+    total: int = 0
+    rate: float = 0.0
+
+
+@dataclass(frozen=True)
+class UpdateFetchEnded:
+    """The download of an update is over."""
+    tag: str
+    staged: str = ""      # the unpacked app folder, ready to install
+    error: str = ""
+    cancelled: bool = False
+
+
 class UiBridge:
     """Thread-safe one-way street from workers to the GUI."""
 

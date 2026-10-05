@@ -99,6 +99,10 @@ class Settings:
     separate_tracks: bool = True    # transcribe both tracks independently
     keep_raw_tracks: bool = False   # keep raw tracks after processing
 
+    # --- Updates ----------------------------------------------------------
+    # Ask GitHub for a newer release at every start (packaged builds only).
+    check_for_updates: bool = True
+
     # --- Internal ---------------------------------------------------------
     schema_version: int = SCHEMA_VERSION
     elevenlabs_api_key_enc: str = ""

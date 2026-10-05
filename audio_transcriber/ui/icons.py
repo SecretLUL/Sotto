@@ -331,6 +331,20 @@ def _draw_chevron_down(draw: ImageDraw.ImageDraw, S: float, fg: str = None):
     _Pen(draw, S, fg).line(6.5, 9.5, 12, 15, 17.5, 9.5)
 
 
+def _draw_refresh(draw: ImageDraw.ImageDraw, S: float, fg: str = None):
+    """Two arrows chasing each other round - a new version of the app."""
+    pen = _Pen(draw, S, fg)
+    for start, end in ((200, 335), (20, 155)):
+        pen.arc(12, 12, 7.5, start, end)
+        angle = math.radians(end)
+        tip_x, tip_y = 12 + 7.5 * math.cos(angle), 12 + 7.5 * math.sin(angle)
+        # Back along the way the arc came, turned out to either side.
+        back = angle - math.pi / 2
+        wings = [(tip_x + 4 * math.cos(back + turn), tip_y + 4 * math.sin(back + turn))
+                 for turn in (-0.55, 0.55)]
+        pen.line(*wings[0], tip_x, tip_y, *wings[1])
+
+
 def _draw_fallback(draw: ImageDraw.ImageDraw, S: float, fg: str = None):
     _Pen(draw, S, fg).disc(12, 12, 6)
 
@@ -358,4 +372,5 @@ _RENDERERS = {
     "folder": _draw_folder,
     "settings": _draw_settings,
     "chevron_down": _draw_chevron_down,
+    "refresh": _draw_refresh,
 }

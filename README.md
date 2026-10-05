@@ -17,6 +17,7 @@ Sotto records your microphone and the system audio as two separate tracks and tu
 - **Live transcription**: with a local model the recording is transcribed while it runs, so Stop only has to catch up with the last seconds.
 - **File upload**: transcribes existing recordings. WAV, MP3, FLAC and OGG are read directly; M4A, AAC, WMA, MP4, WebM and Opus need FFmpeg on the `PATH`.
 - **Nothing gets lost**: it warns before a recording is overwritten, offers to process recordings that were interrupted, and checks the engine, the output folder and the free disk space before it starts.
+- **Updates itself**: at start it asks GitHub for a newer release and shows a banner. "Update now" downloads it in the background, checks it against the release's `SHA256SUMS.txt`, and installs it on restart or when you close Sotto. Models, recordings and settings stay where they are.
 - **Optional**: ElevenLabs Scribe as a cloud engine, and a GPU switch that falls back to the CPU if the GPU run fails. `F5` starts and stops a recording.
 
 ## Download
@@ -32,6 +33,7 @@ Get the archive for your system from the [latest release](https://github.com/Sec
 - On Windows the whisper.cpp engine is downloaded automatically. On Linux and macOS, install it so that `whisper-cli` is on the `PATH` (macOS: `brew install whisper-cpp`), or use ElevenLabs.
 - On an Intel Mac, run from source or build with `python build_release.py`.
 - Models (`bin/`), recordings (`output/`) and `settings.json` are kept next to the executable. Where that folder is not writable, and always on macOS, they go to `%LOCALAPPDATA%\AudioTranscriber`, `~/Library/Application Support/AudioTranscriber` or `~/.local/share/AudioTranscriber`. `AUDIO_TRANSCRIBER_HOME` overrides this.
+- Updates install themselves on Windows and Linux (Settings → "Check for updates at start" turns the check off). On macOS, or when Sotto's folder is not writable, the banner links to the download instead. Versions up to 2.0.2 have no updater yet: install the first one that does by hand.
 - Coming from 2.0 or older, whose folder was called `AudioTranscriber`: extract Sotto next to that folder or into it. On its first start Sotto moves the models, recordings and settings over.
 
 ## Run from source

@@ -179,7 +179,7 @@ class TestNothingIsCutOff(unittest.TestCase):
             captions = {switch._text for switch in _walk(shown.root, "Switch")}
             self.assertEqual(captions, {"Live transcription", "Live preview",
                                         "Separate tracks", "VAD", "Keep raw tracks",
-                                        "GPU"})
+                                        "GPU", "Check for updates at start"})
 
 
 @unittest.skipUnless(HAVE_DISPLAY, "no graphical display available")

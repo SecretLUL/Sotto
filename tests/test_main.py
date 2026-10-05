@@ -19,6 +19,9 @@ SCRIPT = textwrap.dedent("""
         def offer_recovery(self):
             order.append("offer_recovery")
 
+        def start_update_check(self):
+            order.append("start_update_check")
+
     class FakeRoot:
         def after(self, _milliseconds, callback):
             order.append("after")
@@ -59,7 +62,31 @@ class TestEntryPoint(unittest.TestCase):
         # which keeps it invisible until its frame is dark (ui/chrome.py).
         self.assertEqual(
             result.stdout.strip(),
-            "0 migrate,Tk,dark_title_bar,RecorderApp,after,offer_recovery,mainloop")
+            "0 migrate,Tk,dark_title_bar,RecorderApp,after,offer_recovery,"
+            "after,start_update_check,mainloop")
+
+    def test_the_installer_of_an_update_opens_no_window(self):
+        """Started with --apply-update, the new version only installs itself:
+        no window, no migration, no settings - and its exit code is main()'s."""
+        script = textwrap.dedent("""
+            import sys
+            from unittest.mock import patch
+            calls = []
+            sys.argv = ["Sotto", "--apply-update", "--source", "s", "--target", "t"]
+            with patch("tkinter.Tk", side_effect=AssertionError("a window")), \
+                 patch("audio_transcriber.paths.migrate_legacy_data",
+                       side_effect=AssertionError("a migration")), \
+                 patch("audio_transcriber.update.apply_from_command_line",
+                       side_effect=lambda argv: calls.append(argv) or 7):
+                import main
+                code = main.main()
+            print(code, calls)
+        """)
+        result = subprocess.run([sys.executable, "-c", script], cwd=ROOT,
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(),
+                         "7 [['--apply-update', '--source', 's', '--target', 't']]")
 
 
 if __name__ == "__main__":
