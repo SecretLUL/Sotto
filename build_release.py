@@ -21,12 +21,11 @@ import sys
 import tarfile
 import zipfile
 
-# The executable and the folder the archive unpacks to keep the name from
-# before Sotto: models, recordings and settings.json live in that folder, and an
-# update unpacked over it has to find them there. Only the archive itself is
-# free to carry the new name.
-APP_NAME = "AudioTranscriber"
-ARCHIVE_NAME = "Sotto"
+# The executable, the archives and the folder they unpack to. Builds from before
+# Sotto were called AudioTranscriber; a portable install of one keeps its models,
+# recordings and settings.json in that folder, and Sotto moves them over on its
+# first start (paths.migrate_legacy_data).
+APP_NAME = "Sotto"
 FALLBACK_VERSION = "v0.0.0-dev"
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -121,7 +120,7 @@ def write_icon():
 
     Windows takes an .ico with every size in it; on macOS PyInstaller turns a
     PNG into the .icns itself (with Pillow). Linux executables have no icon.
-    Kept apart from build/AudioTranscriber, which PyInstaller --clean empties.
+    Kept apart from build/Sotto, which PyInstaller --clean empties.
     """
     if sys.platform not in ("win32", "darwin"):
         return None
@@ -251,7 +250,7 @@ def create_archive(archive_path, suffix):
 def main():
     version = resolve_version()
     suffix, slug = platform_tag()
-    archive_name = f"{ARCHIVE_NAME}-{version}-{slug}.{suffix}"
+    archive_name = f"{APP_NAME}-{version}-{slug}.{suffix}"
     archive_path = os.path.join(DIST_DIR, archive_name)
 
     print(f"--- Building {APP_NAME} {version} for {slug} ---")
