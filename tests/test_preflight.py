@@ -45,8 +45,7 @@ class PreflightCase(unittest.TestCase):
 
         for target, replacement in (
                 (preflight, ("_free_bytes", free_bytes)),
-                (binaries, ("model_present", lambda name: name in self.present)),
-                (binaries, ("local_engine_problem", lambda *a, **k: None))):
+                (binaries, ("model_present", lambda name: name in self.present))):
             patcher = patch.object(target, replacement[0], replacement[1])
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -72,17 +71,9 @@ class TestEngine(PreflightCase):
         findings = self.check(model=config.CLOUD_MODEL, api_key="   ")
         self.assertEqual(len(texts(findings, preflight.ERROR)), 1)
 
-    def test_the_cloud_with_a_key_needs_neither_engine_nor_model(self):
-        with patch.object(binaries, "local_engine_problem",
-                          return_value="no whisper-cli"):
-            self.present.clear()
-            self.assertEqual(self.check(model=config.CLOUD_MODEL, api_key="sk_x"), [])
-
-    def test_a_missing_local_engine_is_an_error_with_the_way_out(self):
-        with patch.object(binaries, "local_engine_problem",
-                          return_value="Install whisper-cli or use ElevenLabs."):
-            errors = texts(self.check(), preflight.ERROR)
-        self.assertEqual(errors, ["Install whisper-cli or use ElevenLabs."])
+    def test_the_cloud_with_a_key_needs_no_model(self):
+        self.present.clear()
+        self.assertEqual(self.check(model=config.CLOUD_MODEL, api_key="sk_x"), [])
 
     def test_the_key_is_not_asked_for_when_a_local_model_is_chosen(self):
         self.assertEqual(self.check(api_key=""), [])

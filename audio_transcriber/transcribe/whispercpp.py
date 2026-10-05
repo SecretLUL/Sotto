@@ -33,7 +33,7 @@ from .. import paths
 from . import binaries
 from .base import Backend, Segment, TranscriptionError, parse_line
 
-CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+CREATE_NO_WINDOW = 0x08000000
 
 # Number of identical consecutive segments before truncating. Two are kept
 # because "yes, yes" can be genuine speech (N8).

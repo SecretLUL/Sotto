@@ -16,21 +16,24 @@ UPDATE_FLAG = "--apply-update"
 
 
 def main():
+    if sys.platform != "win32":
+        _fatal("Sotto runs on Windows only.")
+        return 1
+
     if UPDATE_FLAG in sys.argv[1:]:
         from audio_transcriber import update
         return update.apply_from_command_line(sys.argv[1:])
 
-    if sys.platform == "win32":
+    try:
+        import ctypes
+        # Enable High-DPI awareness so Windows does not blur or shrink Tkinter on WQHD / 4K monitors
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
         try:
             import ctypes
-            # Enable High-DPI awareness so Windows does not blur or shrink Tkinter on WQHD / 4K monitors
-            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+            ctypes.windll.user32.SetProcessDPIAware()
         except Exception:
-            try:
-                import ctypes
-                ctypes.windll.user32.SetProcessDPIAware()
-            except Exception:
-                pass
+            pass
 
     try:
         import tkinter as tk

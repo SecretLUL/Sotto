@@ -477,10 +477,9 @@ class ModelDownload:
         self.model_name = model_name
         self._fetch_engine = fetch_engine or binaries.ensure_whisper_binary
         self._fetch_model = fetch_model or binaries.ensure_model
-        # Only where whisper.cpp can be fetched at all and is not there yet.
+        # Only while whisper.cpp is not there yet.
         self._engine_needed = engine_needed or (
-            lambda: (binaries.local_engine_problem() is None
-                     and binaries.find_whisper_executable() is None))
+            lambda: binaries.find_whisper_executable() is None)
         self._cancelled = threading.Event()
         self._thread = None
         self._current_step = ""

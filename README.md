@@ -22,18 +22,11 @@ Sotto records your microphone and the system audio as two separate tracks and tu
 
 ## Download
 
-Get the archive for your system from the [latest release](https://github.com/SecretLUL/Sotto/releases/latest), extract it and start `Sotto`.
+Sotto runs on Windows 10 and 11 (x64). Get `Sotto-<version>-windows-x64.zip` from the [latest release](https://github.com/SecretLUL/Sotto/releases/latest), extract it and start `Sotto.exe`. The system audio is recorded through WASAPI loopback, with nothing to install.
 
-| System | Archive | System audio |
-| :--- | :--- | :--- |
-| Windows 10/11, x64 | `Sotto-<version>-windows-x64.zip` | WASAPI loopback, built in |
-| Linux, x64 | `Sotto-<version>-linux-x64.tar.gz` | PulseAudio or PipeWire monitor |
-| macOS, Apple Silicon | `Sotto-<version>-macos-arm64.zip` | a loopback driver such as [BlackHole](https://github.com/ExistentialAudio/BlackHole) |
-
-- On Windows the whisper.cpp engine is downloaded automatically. On Linux and macOS, install it so that `whisper-cli` is on the `PATH` (macOS: `brew install whisper-cpp`), or use ElevenLabs.
-- On an Intel Mac, run from source or build with `python build_release.py`.
-- Models (`bin/`), recordings (`output/`) and `settings.json` are kept next to the executable. Where that folder is not writable, and always on macOS, they go to `%LOCALAPPDATA%\AudioTranscriber`, `~/Library/Application Support/AudioTranscriber` or `~/.local/share/AudioTranscriber`. `AUDIO_TRANSCRIBER_HOME` overrides this.
-- Updates install themselves on Windows and Linux (Settings → "Check for updates at start" turns the check off). On macOS, or when Sotto's folder is not writable, the banner links to the download instead. Versions up to 2.0.2 have no updater yet: install the first one that does by hand.
+- The whisper.cpp engine is downloaded automatically when it is first needed.
+- Models (`bin/`), recordings (`output/`) and `settings.json` are kept next to the executable. Where that folder is not writable, they go to `%LOCALAPPDATA%\AudioTranscriber`. `AUDIO_TRANSCRIBER_HOME` overrides this.
+- Updates install themselves (Settings → "Check for updates at start" turns the check off). When Sotto's folder is not writable, the banner links to the download instead. Versions up to 2.0.2 have no updater yet: install the first one that does by hand.
 - Coming from 2.0 or older, whose folder was called `AudioTranscriber`: extract Sotto next to that folder or into it. On its first start Sotto moves the models, recordings and settings over.
 
 ## Run from source
@@ -45,7 +38,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-On Windows, `Start-Recorder.vbs` starts it without a console window.
+`Start-Recorder.vbs` starts it without a console window.
 
 ## How speakers are told apart
 
@@ -64,7 +57,7 @@ python build_release.py v1.2.0    # standalone build and archive in dist/
 
 The code lives in `audio_transcriber/`: `audio/` captures and loads audio, `transcribe/` runs whisper.cpp and ElevenLabs, `diarize.py` merges the tracks and `ui/` is the Tkinter interface.
 
-To release, run the [Release workflow](https://github.com/SecretLUL/Sotto/actions/workflows/release.yml) from `main` and pick `patch`, `minor` or `major`. It counts on from the newest tag, builds all three platforms, then tags and publishes them with checksums. The rehearsal option builds without publishing.
+To release, run the [Release workflow](https://github.com/SecretLUL/Sotto/actions/workflows/release.yml) from `main` and pick `patch`, `minor` or `major`. It counts on from the newest tag, builds the Windows package, then tags and publishes it with checksums. The rehearsal option builds without publishing.
 
 ## License
 

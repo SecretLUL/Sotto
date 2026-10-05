@@ -2,12 +2,10 @@
 
 Windows draws the title bar itself - light, whatever the window looks like,
 with Tk's feather in the corner - and files a window under the program that
-runs it: python.exe or pythonw.exe, so the taskbar showed Python's icon. On
-other systems only the icon applies.
+runs it: python.exe or pythonw.exe, so the taskbar showed Python's icon.
 """
 
 import ctypes
-import sys
 import tkinter as tk
 
 from . import icons
@@ -17,8 +15,6 @@ APP_ID = "SecretLUL.Sotto"
 
 # Tk picks the size that suits the title bar, the taskbar and Alt+Tab.
 ICON_SIZES = (16, 20, 24, 32, 40, 48, 64, 128, 256)
-
-_IS_WINDOWS = sys.platform == "win32"
 
 # DwmSetWindowAttribute
 _DARK_MODE = 20                  # DWMWA_USE_IMMERSIVE_DARK_MODE
@@ -37,8 +33,6 @@ def claim_taskbar_identity():
     Without one, Windows shows the icon of python.exe for the window, whatever
     icon the window itself has.
     """
-    if not _IS_WINDOWS:
-        return
     try:
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)
     except (AttributeError, OSError):
@@ -63,8 +57,6 @@ def dark_title_bar(window):
     and is made visible once its frame is painted - otherwise the light title
     bar flashes up first.
     """
-    if not _IS_WINDOWS:
-        return
     if window.winfo_ismapped():
         _paint_frame(window)
         return

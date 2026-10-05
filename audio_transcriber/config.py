@@ -83,7 +83,7 @@ class Settings:
     # than the small gain against hallucinations, which diarize.py filters
     # out energy-wise anyway.
     use_vad: bool = False
-    # Let whisper.cpp use the GPU (Vulkan on Windows, Metal on a Mac). Off by
+    # Let whisper.cpp use the GPU (through Vulkan). Off by
     # default because the Vulkan build crashed reproducibly on one AMD card;
     # with it on, a run that fails on the GPU is repeated on the CPU.
     use_gpu: bool = False
@@ -224,14 +224,9 @@ def load(path=None):
     if legacy and not settings.api_key:
         settings.api_key = legacy
         settings.migrated_plaintext_key = True
-        if key_can_be_stored():
-            fate = "has been adopted and will be encrypted the next time you save"
-        else:
-            fate = ("has been adopted for this session only: this system cannot "
-                    "encrypt it, so saving removes the clear-text copy and the "
-                    "key is gone - set ELEVENLABS_API_KEY to keep it")
         warnings.append(
-            f"The API key was stored in clear text in settings.json. It {fate}. "
+            "The API key was stored in clear text in settings.json. It has been "
+            "adopted and will be encrypted the next time you save. "
             "IMPORTANT: revoke that key in the ElevenLabs dashboard and issue "
             "a new one - the old value sat unprotected on disk."
         )
@@ -253,11 +248,6 @@ def _read_model(settings, raw, warnings):
         warnings.append(f"The model '{settings.model}' in settings.json is not "
                         f"known; using {DEFAULT_MODEL}.")
         settings.model = DEFAULT_MODEL
-
-
-def key_can_be_stored():
-    """Whether this system has a secure place for the API key (DPAPI)."""
-    return secretstore.is_available()
 
 
 def save(settings, path=None):
@@ -284,15 +274,9 @@ def save(settings, path=None):
             data["elevenlabs_api_key_enc"] = secretstore.encrypt(settings.api_key)
         except OSError as exc:
             # Store nothing rather than clear text.
-            if key_can_be_stored():
-                warnings.append(f"The API key could not be encrypted ({exc}) and "
-                                f"was not saved. It stays in use until you "
-                                f"close the app.")
-            else:
-                warnings.append("The API key was not saved: this system has no "
-                                "secure storage for it. It stays in use until "
-                                "you close the app; set the ELEVENLABS_API_KEY "
-                                "environment variable to keep it.")
+            warnings.append(f"The API key could not be encrypted ({exc}) and "
+                            f"was not saved. It stays in use until you "
+                            f"close the app.")
 
     tmp_path = path + ".tmp"
     with open(tmp_path, "w", encoding="utf-8") as handle:

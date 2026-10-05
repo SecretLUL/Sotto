@@ -35,11 +35,8 @@ def box(widget):
 
 
 def wheel_down(widget):
-    """One notch of the mouse wheel over `widget`, as the platform sends it."""
-    if widget.tk.call("tk", "windowingsystem") == "x11":
-        widget.event_generate("<Button-5>")
-    else:
-        widget.event_generate("<MouseWheel>", delta=-120)
+    """One notch of the mouse wheel over `widget`."""
+    widget.event_generate("<MouseWheel>", delta=-120)
 
 
 def describe(widget):

@@ -12,7 +12,6 @@ SAMPLE_KEY = "sk_testkey_0123456789abcdef"
 
 
 class TestSecretStore(unittest.TestCase):
-    @unittest.skipUnless(secretstore.is_available(), "DPAPI is Windows only")
     def test_roundtrip(self):
         token = secretstore.encrypt(SAMPLE_KEY)
         self.assertNotIn(SAMPLE_KEY, token)
@@ -52,8 +51,7 @@ class TestSettingsFile(unittest.TestCase):
         self.assertEqual(loaded.language, "en")
         self.assertEqual(loaded.output_dir, "/custom/output/folder")
         self.assertEqual(loaded.get_output_dir(), os.path.abspath("/custom/output/folder"))
-        if secretstore.is_available():
-            self.assertEqual(loaded.api_key, SAMPLE_KEY)
+        self.assertEqual(loaded.api_key, SAMPLE_KEY)
 
 
     def test_key_is_never_written_in_clear_text(self):
@@ -68,8 +66,7 @@ class TestSettingsFile(unittest.TestCase):
 
         data = json.loads(raw.decode("utf-8"))
         self.assertNotIn("elevenlabs_api_key", data)
-        if secretstore.is_available():
-            self.assertTrue(data["elevenlabs_api_key_enc"])
+        self.assertTrue(data["elevenlabs_api_key_enc"])
 
     def test_migration_from_plaintext_schema_v1(self):
         """An existing file in the old format is adopted - with a warning."""
@@ -150,8 +147,7 @@ class TestSettingsFile(unittest.TestCase):
             config.save(settings, self.path)
             with open(self.path, encoding="utf-8") as handle:
                 stored = json.load(handle)["elevenlabs_api_key_enc"]
-        if secretstore.is_available():
-            self.assertTrue(stored)
+        self.assertTrue(stored)
 
 
 class TestGpuSetting(unittest.TestCase):
@@ -304,9 +300,8 @@ class TestModelSelection(unittest.TestCase):
 class TestKeyStorageIsHonest(unittest.TestCase):
     """A key that cannot be stored must not look as if it had been.
 
-    Without DPAPI (Linux, macOS) save() wrote an empty value and said nothing:
-    the key was gone at the next start, and the window claimed it was
-    'encrypted with the Windows DPAPI'.
+    A save() that could not encrypt the key used to write an empty value and
+    say nothing: the key was gone at the next start.
     """
 
     def setUp(self):
@@ -331,27 +326,17 @@ class TestKeyStorageIsHonest(unittest.TestCase):
         with open(self.path, encoding="utf-8") as handle:
             return handle.read()
 
-    def test_without_secure_storage_the_key_is_not_written_and_save_says_so(self):
+    def test_a_dpapi_call_that_fails_is_reported(self):
         settings = self._with_key()
-        with patch.object(secretstore, "_IS_WINDOWS", False):       # Linux, macOS
+        with patch.object(secretstore, "encrypt",
+                          side_effect=OSError("CryptProtectData failed")):
             warnings = config.save(settings, self.path)
-
         self.assertEqual(json.loads(self._file())["elevenlabs_api_key_enc"], "")
-        self.assertNotIn(SAMPLE_KEY, self._file())
-        self.assertEqual(len(warnings), 1)
-        self.assertIn("not saved", warnings[0])
-        self.assertIn("ELEVENLABS_API_KEY", warnings[0])
-        self.assertEqual(settings.api_key, SAMPLE_KEY, "still usable in this session")
-
-    def test_a_dpapi_call_that_fails_is_reported_too(self):
-        with patch.object(secretstore, "_IS_WINDOWS", True), \
-                patch.object(secretstore, "encrypt",
-                             side_effect=OSError("CryptProtectData failed")):
-            warnings = config.save(self._with_key(), self.path)
         self.assertEqual(len(warnings), 1)
         self.assertIn("could not be encrypted", warnings[0])
         self.assertIn("CryptProtectData failed", warnings[0])
         self.assertNotIn(SAMPLE_KEY, self._file())
+        self.assertEqual(settings.api_key, SAMPLE_KEY, "still usable in this session")
 
     def test_a_key_that_was_stored_needs_no_warning(self):
         with patch.object(secretstore, "encrypt", return_value="TOKEN"):
@@ -361,37 +346,22 @@ class TestKeyStorageIsHonest(unittest.TestCase):
 
     def test_a_key_that_comes_from_the_environment_needs_none_either(self):
         os.environ["ELEVENLABS_API_KEY"] = "env-key-123"
-        with patch.object(secretstore, "_IS_WINDOWS", False):
-            settings, _warnings = config.load(self.path)
-            self.assertEqual(config.save(settings, self.path), [])
+        settings, _warnings = config.load(self.path)
+        self.assertEqual(config.save(settings, self.path), [])
 
-    def test_the_clear_text_key_of_an_old_file_is_not_promised_encryption_it_cannot_get(self):
+    def test_the_clear_text_key_of_an_old_file_is_adopted_with_a_warning(self):
         old_file = {"elevenlabs_api_key": SAMPLE_KEY}
         with open(self.path, "w", encoding="utf-8") as handle:
             json.dump(old_file, handle)
 
-        with patch.object(secretstore, "_IS_WINDOWS", True):
-            _settings, warnings = config.load(self.path)
-        self.assertIn("will be encrypted", " ".join(warnings))
-
-        with patch.object(secretstore, "_IS_WINDOWS", False):
-            settings, warnings = config.load(self.path)
+        settings, warnings = config.load(self.path)
         text = " ".join(warnings)
-        self.assertNotIn("will be encrypted", text)
-        self.assertIn("this session only", text)
-        self.assertIn("ELEVENLABS_API_KEY", text)
+        self.assertIn("will be encrypted", text)
         self.assertIn("revoke", text, "the exposed key still has to be replaced")
         self.assertEqual(settings.api_key, SAMPLE_KEY)
 
     def test_no_key_no_warning(self):
-        with patch.object(secretstore, "_IS_WINDOWS", False):
-            self.assertEqual(config.save(config.Settings(), self.path), [])
-
-    def test_the_window_can_ask_whether_a_key_can_be_kept(self):
-        with patch.object(secretstore, "_IS_WINDOWS", False):
-            self.assertFalse(config.key_can_be_stored())
-        with patch.object(secretstore, "_IS_WINDOWS", True):
-            self.assertTrue(config.key_can_be_stored())
+        self.assertEqual(config.save(config.Settings(), self.path), [])
 
 
 class TestSettingsSnapshot(unittest.TestCase):

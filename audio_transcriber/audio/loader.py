@@ -47,7 +47,7 @@ def load_audio_file(file_path: str, target_rate: int = dsp.TARGET_RATE) -> np.nd
 
 def _load_via_ffmpeg(file_path: str, target_rate: int) -> np.ndarray:
     """Convert audio file using ffmpeg to 16 kHz mono PCM WAV."""
-    create_no_window = 0x08000000 if os.name == "nt" else 0
+    create_no_window = 0x08000000
     temp_fd, temp_wav = tempfile.mkstemp(suffix=".wav")
     os.close(temp_fd)
 

@@ -128,12 +128,7 @@ class TestAppLifecycle(unittest.TestCase):
 
 
     def test_output_name_sanitising(self):
-        """Path traversal through the file name field must be impossible.
-
-        The results are identical on every platform. os.path.basename() used to
-        decide this by host rules, so a backslash path sanitised one way on
-        Windows and another on Linux - caught by CI on the first Linux run.
-        """
+        """Path traversal through the file name field must be impossible."""
         cases = {
             "..\\..\\windows\\system32\\evil": "evil",
             "my_meeting.wav": "my_meeting",
@@ -705,7 +700,7 @@ class TestPreflightInTheApp(unittest.TestCase):
 
 @unittest.skipUnless(_can_open_window(), "no graphical display available")
 class TestApiKeyHonesty(unittest.TestCase):
-    """What the window says about the key must be true on this system."""
+    """What the window says about the key must be true."""
 
     def setUp(self):
         from unittest.mock import patch
@@ -735,14 +730,11 @@ class TestApiKeyHonesty(unittest.TestCase):
         icons._ICON_CACHE.clear()
         shutil.rmtree(self.out_dir, ignore_errors=True)
 
-    def _build(self, can_store):
-        from unittest.mock import patch
-        from audio_transcriber import config
+    def _build(self):
         from audio_transcriber.ui.app import RecorderApp
-        with patch.object(config, "key_can_be_stored", return_value=can_store):
-            self.root = tk.Tk()
-            self.root.withdraw()
-            self.app = RecorderApp(self.root)
+        self.root = tk.Tk()
+        self.root.withdraw()
+        self.app = RecorderApp(self.root)
         self.app._monitor_thread = None
         return self.app
 
@@ -758,23 +750,16 @@ class TestApiKeyHonesty(unittest.TestCase):
         collect(widget)
         return " ".join(found)
 
-    def test_where_the_key_is_encrypted_the_hint_says_how(self):
-        text = self._labels(self._build(can_store=True).key_field)
+    def test_the_hint_says_how_the_key_is_kept(self):
+        text = self._labels(self._build().key_field)
         self.assertIn("DPAPI", text)
-        self.assertNotIn("until you close the app", text)
-
-    def test_where_it_cannot_be_the_hint_does_not_claim_encryption(self):
-        text = self._labels(self._build(can_store=False).key_field)
-        self.assertNotIn("DPAPI", text)
-        self.assertNotIn("Encrypted", text)
-        self.assertIn("until you close the app", text)
-        self.assertIn("ELEVENLABS_API_KEY", text)
 
     def test_saving_a_key_that_could_not_be_kept_tells_the_user(self):
         from unittest.mock import patch
         from audio_transcriber import config
-        app = self._build(can_store=False)
-        note = "The API key was not saved: this system has no secure storage for it."
+        app = self._build()
+        note = ("The API key could not be encrypted (CryptProtectData failed) "
+                "and was not saved.")
         with patch.object(config, "save", return_value=[note]), \
                 patch("audio_transcriber.ui.app.messagebox") as box:
             app.save_settings()
@@ -786,7 +771,7 @@ class TestApiKeyHonesty(unittest.TestCase):
     def test_a_plain_save_is_still_just_a_save(self):
         from unittest.mock import patch
         from audio_transcriber import config
-        app = self._build(can_store=True)
+        app = self._build()
         with patch.object(config, "save", return_value=[]), \
                 patch("audio_transcriber.ui.app.messagebox") as box:
             app.save_settings()
@@ -1294,7 +1279,6 @@ class TestModelPanel(unittest.TestCase):
                          lambda name: name in self.present),
             patch.object(binaries, "find_whisper_executable",
                          lambda *a, **k: self.engine),
-            patch.object(binaries, "local_engine_problem", lambda *a, **k: None),
             patch("audio_transcriber.ui.app.preflight.no_room_for_models",
                   return_value=None),
             patch("audio_transcriber.ui.app.pipeline.ModelDownload"),

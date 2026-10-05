@@ -2,9 +2,12 @@ name: Release
 
 # A release takes nothing but the mouse: Actions -> Release -> "Run workflow",
 # pick which number goes up, done. The version is counted from the newest
-# release tag, all three platforms are built under it, and the tag is pushed
-# only once every build has succeeded - a failed build leaves no tag behind
-# that nothing was ever released under.
+# release tag, the Windows build is made under it, and the tag is pushed only
+# once that build has succeeded - a failed build leaves no tag behind that
+# nothing was ever released under.
+#
+# Windows is the only system released: it is the only one the releases can be
+# tried on before they go out.
 #
 # Pushing a tag by hand still works; that path releases exactly that tag.
 on:
@@ -97,7 +100,7 @@ jobs:
           tag="v$version"
 
           # The cheapest failure there is: a tag that exists already means the
-          # release does too, and finding that out after three builds helps
+          # release does too, and finding that out after the build helps
           # nobody.
           if [ "$EVENT_NAME" = "workflow_dispatch" ] \
               && git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null; then
@@ -139,36 +142,14 @@ jobs:
         run: python run_tests.py
 
   build:
-    name: Build ${{ matrix.name }}
+    name: Build Windows x64
     needs: [version, test]
-    strategy:
-      matrix:
-        include:
-          - name: Windows x64
-            os: windows-latest
-            artifact: windows
-          - name: Linux x64
-            os: ubuntu-latest
-            artifact: linux
-          - name: macOS (Apple Silicon)
-            os: macos-latest
-            artifact: macos
-    runs-on: ${{ matrix.os }}
+    runs-on: windows-latest
     env:
       RELEASE_VERSION: ${{ needs.version.outputs.tag }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
-
-      - name: Install PortAudio and Tkinter (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y portaudio19-dev python3-tk libasound2-dev libjack-jackd2-dev
-
-      - name: Install PortAudio (macOS)
-        if: runner.os == 'macOS'
-        run: brew install portaudio
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v7
@@ -181,20 +162,18 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      # build_release.py names the archive after RELEASE_VERSION and the
-      # platform, so all three agree with the tag.
+      # build_release.py names the archive after RELEASE_VERSION, so it
+      # agrees with the tag.
       - name: Build the standalone package
         run: python build_release.py
 
-      # Kept with the run as well: after a rehearsal, these are what can be
+      # Kept with the run as well: after a rehearsal, this is what can be
       # downloaded and tried.
       - name: Upload the package
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.artifact }}-release-package
-          path: |
-            dist/Sotto-*.zip
-            dist/Sotto-*.tar.gz
+          name: windows-release-package
+          path: dist/Sotto-*.zip
           if-no-files-found: error
 
   publish:
@@ -219,8 +198,8 @@ jobs:
           merge-multiple: true
           path: release-assets/
 
-      # Unsigned downloads cannot be vouched for by SmartScreen or Gatekeeper;
-      # a published checksum at least lets anyone verify that the file they got
+      # An unsigned download cannot be vouched for by SmartScreen; a published
+      # checksum at least lets anyone verify that the file they got
       # is byte for byte the one this workflow built.
       - name: Write checksums
         working-directory: release-assets
@@ -264,10 +243,8 @@ jobs:
           | System | File |
           | :--- | :--- |
           | Windows 10/11, x64 | \`Sotto-$TAG-windows-x64.zip\` |
-          | Linux, x64 | \`Sotto-$TAG-linux-x64.tar.gz\` |
-          | macOS, Apple Silicon | \`Sotto-$TAG-macos-arm64.zip\` |
 
-          Extract the archive and start \`Sotto\`. Coming from a version whose folder was called \`AudioTranscriber\`: extract Sotto next to that folder or into it, and its first start moves the models, recordings and settings over. Recording the system audio on macOS needs a loopback driver such as [BlackHole](https://github.com/ExistentialAudio/BlackHole); on an Intel Mac, run Sotto from source. \`SHA256SUMS.txt\` lists the checksum of every file.
+          Extract the archive and start \`Sotto.exe\`. Coming from a version whose folder was called \`AudioTranscriber\`: extract Sotto next to that folder or into it, and its first start moves the models, recordings and settings over. \`SHA256SUMS.txt\` lists the checksum of every file.
           EOF
 
       - name: Publish the release

@@ -91,8 +91,8 @@
     <text x="103" y="314" textLength="129.2" lengthAdjust="spacingAndGlyphs" fill="#94a3b8">Local whisper.cpp</text>
     <rect x="257.2" y="292" width="136.4" height="34" rx="17" fill="#1b1e26" stroke="#2a2f3d"/>
     <text x="272.2" y="314" textLength="106.4" lengthAdjust="spacingAndGlyphs" fill="#94a3b8">Exact speakers</text>
-    <rect x="403.6" y="292" width="204.8" height="34" rx="17" fill="#1b1e26" stroke="#2a2f3d"/>
-    <text x="418.6" y="314" textLength="174.8" lengthAdjust="spacingAndGlyphs" fill="#94a3b8">Windows · Linux · macOS</text>
+    <rect x="403.6" y="292" width="128.8" height="34" rx="17" fill="#1b1e26" stroke="#2a2f3d"/>
+    <text x="418.6" y="314" textLength="98.8" lengthAdjust="spacingAndGlyphs" fill="#94a3b8">Windows 10/11</text>
   </g>
 
   <!-- What it produces: who said what -->
