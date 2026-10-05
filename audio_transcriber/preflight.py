@@ -81,22 +81,32 @@ def _engine(settings, recording):
     if not missing:
         return []
 
-    sizes = {name: binaries.MODEL_SIZE_BYTES.get(name, 0) for name in missing}
-    needed = sum(sizes.values())
-    free = _free_bytes(paths.BIN_DIR)
-    if free is not None and needed and free < needed * DOWNLOAD_HEADROOM:
-        names = " and ".join(f"'{name}'" for name in missing)
-        drive = os.path.splitdrive(paths.BIN_DIR)[0] or paths.BIN_DIR
-        return [Finding(ERROR,
-                        f"Not enough free space for the model {names}: it needs "
-                        f"{_size(needed)} on {drive}, and {_size(free)} is free.")]
+    problem = no_room_for_models(missing)
+    if problem:
+        return [Finding(ERROR, problem)]
 
+    sizes = {name: binaries.MODEL_SIZE_BYTES.get(name, 0) for name in missing}
     when = ("It is downloaded in the background while you record."
             if recording else
             "It is downloaded first; the transcription starts afterwards.")
     return [Finding(NOTE, f"The model '{name}' ({_size(sizes[name])}) is not on "
                           f"this computer yet. {when}")
             for name in missing]
+
+
+def no_room_for_models(names):
+    """Why the models `names` do not fit on the disk, or None if they do.
+
+    Also asked by the Settings tab before it downloads a model on request.
+    """
+    needed = sum(binaries.MODEL_SIZE_BYTES.get(name, 0) for name in names)
+    free = _free_bytes(paths.BIN_DIR)
+    if free is None or not needed or free >= needed * DOWNLOAD_HEADROOM:
+        return None
+    listed = " and ".join(f"'{name}'" for name in names)
+    drive = os.path.splitdrive(paths.BIN_DIR)[0] or paths.BIN_DIR
+    return (f"Not enough free space for the model {listed}: it needs "
+            f"{_size(needed)} on {drive}, and {_size(free)} is free.")
 
 
 def _output_folder(out_dir):

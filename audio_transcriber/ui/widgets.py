@@ -671,6 +671,106 @@ class StatusPill(tk.Canvas):
 
 
 # ======================================================================
+class ProgressBar(tk.Canvas):
+    """A slim rounded progress bar - the model download on the Settings tab.
+
+    set(fraction) with 0..1 fills it. The fill glides towards the value
+    (tick), so ten reports a second read as one movement rather than steps, and
+    a sheen runs along it while it is under way. set(None) means "busy, length
+    unknown" (unpacking an archive): a segment sweeps across instead.
+    tick() is driven by the window's ticker.
+    """
+
+    GLIDE = 8.0               # how fast the fill catches up, per second
+    SWEEP_S = 1.3             # one pass of the busy segment
+    SHEEN_S = 1.8             # one pass of the sheen
+    SHEEN_W = 70              # at 96 dpi
+
+    def __init__(self, parent, height=8, bg=T.CARD, colour=T.ACCENT):
+        super().__init__(parent, bg=bg, highlightthickness=0, bd=0,
+                         width=T.px(120), height=T.px(height))
+        self._colour = colour
+        self._target = 0.0
+        self._shown = 0.0
+        self._phase = 0.0
+        self.bind("<Configure>", lambda _e: self._render())
+        self._render()
+
+    @property
+    def fraction(self):
+        """The value last set; None while busy without one."""
+        return self._target
+
+    def set(self, fraction):
+        if fraction is None:
+            self._target = None
+        else:
+            fraction = max(0.0, min(1.0, float(fraction)))
+            # A new file starts at the beginning again: no gliding backwards.
+            if self._target is None or fraction < self._shown:
+                self._shown = fraction
+            self._target = fraction
+        self._render()
+
+    def tick(self, dt=0.04):
+        if not self.winfo_ismapped():
+            return
+        self._phase += dt
+        if self._target is not None:
+            gap = self._target - self._shown
+            self._shown = (self._target if abs(gap) < 0.001
+                           else self._shown + gap * min(1.0, dt * self.GLIDE))
+        self._render()
+
+    def _render(self):
+        self.delete("all")
+        width = max(self.winfo_width(), 2)
+        height = int(self["height"])
+        radius = height / 2
+        T.round_rect(self, 0, 0, width, height, radius,
+                     fill=T.mix(self["bg"], T.BG_DEEP, 0.85),
+                     outline=T.BORDER, width=1)
+
+        if self._target is None:
+            share = (self._phase / self.SWEEP_S) % 1.0
+            eased = 0.5 - 0.5 * math.cos(math.pi * share)
+            segment = width * 0.3
+            left = -segment + (width + segment) * eased
+            x0, x1 = max(0, left), min(width, left + segment)
+            if x1 - x0 >= 2:
+                T.round_rect(self, x0, 0, x1, height, radius,
+                             fill=self._colour, outline="")
+            return
+
+        filled = width * self._shown
+        if filled < 2:
+            return
+        T.round_rect(self, 0, 0, filled, height, radius,
+                     fill=self._colour, outline="")
+        # A lighter top edge gives the fill some body.
+        if filled > height:
+            self.create_line(radius, 1.5, filled - radius, 1.5, width=1,
+                             fill=T.mix(self._colour, "#ffffff", 0.35))
+        # The sheen, while there is still something to come.
+        if self._shown < 0.999 and filled > 2 * height:
+            sheen = T.px(self.SHEEN_W)
+            share = (self._phase / self.SHEEN_S) % 1.0
+            centre = -sheen + (filled + 2 * sheen) * share
+            # Brightest in the middle, fading towards both sides: the widest,
+            # faintest band first, the narrow bright one on top.
+            steps = 6
+            for step in range(steps, 0, -1):
+                half = sheen / 2 * step / steps
+                x0 = max(radius, centre - half)
+                x1 = min(filled - radius, centre + half)
+                if x1 - x0 >= 1:
+                    self.create_rectangle(
+                        x0, 1, x1, height - 1, outline="",
+                        fill=T.mix(self._colour, "#ffffff",
+                                   0.14 * (1 - (step - 1) / steps)))
+
+
+# ======================================================================
 class Transcript(tk.Frame):
     """The transcript pane with speaker colours and a slim scrollbar.
 
@@ -1170,8 +1270,15 @@ class IconBadge(tk.Canvas):
         side = T.px(size)
         super().__init__(parent, width=side, height=side, bg=bg,
                          highlightthickness=0, bd=0)
+        self._size = size
+        self.set(icon_name, colour)
+
+    def set(self, icon_name, colour):
+        """Another icon and colour - the state of the model on the Settings tab."""
+        side = int(self["width"])
+        self.delete("all")
         T.round_rect(self, 0.5, 0.5, side - 0.5, side - 0.5, side * 0.3,
-                     fill=T.mix(bg, colour, 0.16), outline="")
-        self._image = icons.get_icon(icon_name, size=T.px(round(size * 0.56)),
+                     fill=T.mix(self["bg"], colour, 0.16), outline="")
+        self._image = icons.get_icon(icon_name, size=T.px(round(self._size * 0.56)),
                                      fg=colour)
         self.create_image(side / 2, side / 2, image=self._image)

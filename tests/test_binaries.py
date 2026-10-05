@@ -91,6 +91,17 @@ class TestDownload(unittest.TestCase):
         self.assertEqual(os.path.getsize(dest), len(PAYLOAD))
         self.assertFalse(os.path.exists(dest + ".part"))
 
+    def test_bytes_are_reported_for_a_progress_bar(self):
+        dest = os.path.join(self.dir, "model.bin")
+        reports = []
+        with _Server() as base:
+            binaries.download(f"{base}/big", dest, "Test file",
+                              on_bytes=lambda done, total: reports.append((done, total)))
+        self.assertGreater(len(reports), 1)
+        self.assertEqual(reports[-1], (len(BIG), len(BIG)))
+        done = [value for value, _total in reports]
+        self.assertEqual(done, sorted(done))
+
     def test_truncated_download_leaves_no_file(self):
         """Regression H8: the previous version wrote straight to the target
         file. An abort left a partial file behind that passed as a valid model

@@ -12,6 +12,7 @@ import os
 import threading
 import time
 import tkinter as tk
+from dataclasses import asdict
 from tkinter import filedialog, messagebox, ttk
 
 try:
@@ -26,14 +27,17 @@ from .. import config, paths, pipeline, preflight
 from ..audio import capture
 from ..audio import devices as devmod
 from ..audio.capture import AudioEngine
-from ..events import (Failed, Finished, LivePreview, Log, Progress, Status,
-                      UiBridge)
+from ..events import (Failed, Finished, LivePreview, Log, ModelFetch,
+                      ModelFetchEnded, Progress, Status, UiBridge)
+from ..transcribe import binaries
 from ..transcribe.base import format_clock
 from . import chrome, dialogs, icons
 from . import theme as T
 from . import widgets as W
 
 METER_INTERVAL_MS = 40
+# How often the ticker asks whether there are unsaved settings.
+SAVE_CHECK_INTERVAL_S = 0.2
 
 # The window, designed for a 96 dpi screen: what it opens at, and the least it
 # may be shrunk to. Both are scaled with the display and kept within the screen
@@ -80,6 +84,10 @@ class RecorderApp:
         self.recording_started_at = None
         self._run_settings = None        # the copy of the settings a run works on
         self._prefetch = None            # fetches the model while recording
+        self._model_download = None      # the Settings tab's Download button
+        self._model_fetch_error = None   # (model, message) of its last failure
+        self._saved_settings = None      # what was saved last; None: save anyway
+        self._save_checked_at = 0.0
         self._work_thread = None         # the finalizer thread of the current run
         self._processing_base = None     # raw-track name of a recovered recording
         self._unfinished = []            # what find_unfinished() saw last
@@ -102,6 +110,12 @@ class RecorderApp:
                 "→ The key will be stored encrypted the next time you save.\n\n")
 
         self.refresh_devices()
+        # The window now shows what settings.json holds - unless reading it
+        # had something to correct or a key still has to be encrypted.
+        needs_saving = bool(warnings) or (self.settings.migrated_plaintext_key
+                                          and config.key_can_be_stored())
+        self._saved_settings = None if needs_saving else self._settings_in_window()
+        self._refresh_save_button()
         self._tick()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.bind("<F5>", lambda _e: self._toggle_recording())
@@ -277,14 +291,18 @@ class RecorderApp:
         self.model_combo = model_field.widget
         self.model_combo.current(config.model_index(self.settings.model))
         self.model_combo.bind("<<ComboboxSelected>>", lambda _e: (
-            self._refresh_key_state(), self._refresh_subtitle()))
+            self._refresh_key_state(), self._refresh_model_state(),
+            self._refresh_subtitle()))
 
         lang_field = W.Field(body, "Language", lambda p: _combo(
             p, [choice[0] for choice in config.LANGUAGE_CHOICES]), icon_name="globe")
         lang_field.grid(row=0, column=1, sticky="ew")
         self.lang_combo = lang_field.widget
+        # An unknown code keeps the default language, not the first entry -
+        # which is automatic detection.
         self.lang_combo.current(_index_of(config.LANGUAGE_CHOICES,
-                                          self.settings.language))
+                                          self.settings.language,
+                                          fallback=config.Settings.language))
         self.lang_combo.bind("<<ComboboxSelected>>",
                              lambda _e: self._refresh_subtitle())
 
@@ -303,11 +321,54 @@ class RecorderApp:
                                 font=T.fonts["body"]),
             hint=KEY_HINT_STORED if config.key_can_be_stored() else KEY_HINT_SESSION,
             icon_name="lock", aside=show_button)
-        self.key_field.grid(row=1, column=0, columnspan=2, sticky="ew",
+        self.key_field.grid(row=2, column=0, columnspan=2, sticky="ew",
                             pady=(T.MD, 0))
         self.api_entry = self.key_field.widget
         self.api_entry.insert(0, self.settings.api_key)
         self._key_visible = False
+
+        self._build_model_panel(body)
+
+    def _build_model_panel(self, body):
+        """Whether the local model is on this computer, and a button to fetch it.
+
+        Shown only while a local model is chosen (_refresh_model_state). A model
+        used to come only with the first recording that needed it - 3 GB of
+        large-v3 at the start of a meeting - and nothing showed whether it was
+        there.
+        """
+        panel = self.model_panel = tk.Frame(body, bg=T.CARD)
+        panel.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(T.MD, 0))
+        panel.columnconfigure(1, weight=1)
+        tk.Frame(panel, bg=T.BORDER, height=1).grid(
+            row=0, column=0, columnspan=3, sticky="ew", pady=(0, T.MD))
+
+        self.model_badge = W.IconBadge(panel, "save", T.TEXT_MUTE)
+        self.model_badge.grid(row=1, column=0, rowspan=2, sticky="nw",
+                              padx=(0, T.MD), pady=(T.px(2), 0))
+        self.model_state_label = tk.Label(panel, bg=T.CARD, fg=T.TEXT,
+                                          font=T.fonts["body_bold"], anchor="w")
+        self.model_state_label.grid(row=1, column=1, sticky="w")
+        self.model_detail = W.WrapLabel(panel, font=T.fonts["small"])
+        self.model_detail.grid(row=2, column=1, sticky="ew", pady=(T.px(2), 0))
+        self.model_btn = W.Button(panel, text="Download", icon_name="save",
+                                  kind="accent", width=130, height=34,
+                                  command=self._on_model_button)
+        self.model_btn.grid(row=1, column=2, rowspan=2, sticky="e",
+                            padx=(T.MD, 0))
+
+        # Only while a download runs.
+        self.model_progress = tk.Frame(panel, bg=T.CARD)
+        self.model_progress.grid(row=3, column=1, columnspan=2, sticky="ew",
+                                 pady=(T.SM, 0))
+        self.model_progress.columnconfigure(0, weight=1)
+        self.model_bar = W.ProgressBar(self.model_progress)
+        self.model_bar.grid(row=0, column=0, sticky="ew")
+        self.model_percent = tk.Label(self.model_progress, bg=T.CARD,
+                                      fg=T.TEXT_DIM, font=T.fonts["mono_small"],
+                                      width=6, anchor="e")
+        self.model_percent.grid(row=0, column=1, sticky="e", padx=(T.SM, 0))
+        self.model_progress.grid_remove()
 
     # ------------------------------------------------------------------
     def _build_output_folder(self, parent):
@@ -509,6 +570,11 @@ class RecorderApp:
         self.bridge.on(LivePreview, self._on_live_preview)
         self.bridge.on(Finished, self._on_finished)
         self.bridge.on(Failed, self._on_failed)
+        self.bridge.on(ModelFetch, self._on_model_fetch)
+        self.bridge.on(ModelFetchEnded, self._on_model_fetch_ended)
+        # A recording may have fetched the model in the meantime.
+        self.notebook.bind("<<NotebookTabChanged>>",
+                           lambda _e: self._refresh_model_state())
 
     def _on_live_preview(self, event):
         self.transcript.set_transcript(event.text, header=event.header,
@@ -565,6 +631,7 @@ class RecorderApp:
         self._on_sys_gain(self.settings.loop_gain_db)
 
         self._refresh_key_state()
+        self._refresh_model_state()
         self.restart_monitoring()
 
     @staticmethod
@@ -1003,7 +1070,9 @@ class RecorderApp:
     # Settings
     # ==================================================================
     def _sync_settings_from_ui(self):
-        settings = self.settings
+        self._read_settings_from_ui(self.settings)
+
+    def _read_settings_from_ui(self, settings):
         settings.mic_device = self.mic_combo.get()
         settings.loop_device = self.sys_combo.get()
         settings.mic_gain_db = round(float(self.mic_gain.get()), 1)
@@ -1030,6 +1099,10 @@ class RecorderApp:
             messagebox.showerror("Error", f"Settings could not be saved:\n{exc}")
             return
         self.settings.migrated_plaintext_key = False
+        # Saving again would not change what is stored - even after a warning:
+        # a key that could not be secured would not be the second time either.
+        self._saved_settings = self._settings_in_window()
+        self._refresh_save_button()
         if warnings:
             # Pressed 'Save' and something did not get saved: say so where the
             # user is looking, not in a log on another tab.
@@ -1037,6 +1110,29 @@ class RecorderApp:
             messagebox.showwarning("Settings saved", "\n\n".join(warnings))
             return
         self.status.set("settings saved", T.OK)
+
+    def _settings_in_window(self):
+        """What 'Save settings' would store now, read from the widgets."""
+        pending = self.settings.snapshot()
+        self._read_settings_from_ui(pending)
+        state = asdict(pending)
+        state.pop("migrated_plaintext_key", None)
+        return state
+
+    def _refresh_save_button(self):
+        """'Save settings' in colour only while there is something to save.
+
+        Asked by the ticker a few times a second: the settings live in a dozen
+        widgets on two tabs, and asking them all beats wiring every one up.
+        _saved_settings is None while saving is always worth it (a key from an
+        old settings file still to be encrypted, a file that had to be
+        corrected when it was read).
+        """
+        unsaved = (self._saved_settings is None
+                   or self._settings_in_window() != self._saved_settings)
+        state = "normal" if unsaved else "disabled"
+        if str(self.save_settings_btn["state"]) != state:
+            self.save_settings_btn.config(state=state)
 
     def _refresh_subtitle(self):
         self.subtitle.config(text=_engine_summary(
@@ -1052,6 +1148,132 @@ class RecorderApp:
             self.key_field.grid()
         else:
             self.key_field.grid_remove()
+
+    # ------------------------------------------------------------------
+    # The local model on the Settings tab
+    # ------------------------------------------------------------------
+    def _refresh_model_state(self):
+        """Show whether the chosen local model is here - and what to do if not."""
+        self._refresh_model_labels()
+        key = config.model_key(self.model_combo.current())
+        if key == config.CLOUD_MODEL:
+            self.model_panel.grid_remove()
+            return
+        self.model_panel.grid()
+        if self._model_download is not None:
+            return                           # its events keep the panel up to date
+
+        named = f"'{key}'"
+        model_here = binaries.model_present(key)
+        engine_here = binaries.find_whisper_executable() is not None
+        engine_problem = binaries.local_engine_problem()
+        error = self._model_fetch_error
+        if error is not None and error[0] != key:
+            error = None
+
+        if error is not None:
+            self._show_model_state("warning", T.DANGER, "Download failed",
+                                   error[1], button="Try again")
+        elif model_here and engine_here:
+            self._show_model_state(
+                "check", T.OK, "Downloaded",
+                f"The model {named} is on this computer, ready to transcribe "
+                f"without an internet connection.")
+        elif model_here and engine_problem:
+            self._show_model_state("warning", T.WARN, "whisper.cpp is missing",
+                                   engine_problem)
+        elif model_here:
+            self._show_model_state(
+                "save", T.WARN, "Almost ready",
+                f"The model {named} is here; whisper.cpp itself still has to be "
+                f"fetched.", button="Download")
+        else:
+            self._show_model_state(
+                "save", T.WARN, "Not downloaded",
+                f"The model {named} is fetched the first time a recording needs "
+                f"it - or now, so that nothing has to wait for it then.",
+                button="Download")
+
+    def _refresh_model_labels(self):
+        """Mark the models that are on this computer in the model list."""
+        index = self.model_combo.current()
+        labels = [label + ("   ✓ downloaded"
+                           if name and binaries.model_present(name) else "")
+                  for label, name in config.MODEL_CHOICES]
+        if list(self.model_combo["values"]) != labels:
+            self.model_combo["values"] = labels
+            self.model_combo.current(max(0, index))
+
+    def _show_model_state(self, icon_name, colour, title, detail, button=None):
+        self.model_badge.set(icon_name, colour)
+        self.model_state_label.config(text=title)
+        self.model_detail.config(text=detail)
+        self.model_progress.grid_remove()
+        if button is None:
+            self.model_btn.grid_remove()
+            return
+        self.model_btn.config(text=button, kind="accent", icon_name="save",
+                              state="normal")
+        self.model_btn.grid()
+
+    def _on_model_button(self):
+        """Download - or, while a download runs, Cancel."""
+        download = self._model_download
+        if download is not None:
+            download.cancel()
+            self.model_state_label.config(text="Cancelling…")
+            self.model_btn.config(state="disabled")
+            return
+
+        key = config.model_key(self.model_combo.current())
+        if key == config.CLOUD_MODEL:
+            return
+        no_room = (None if binaries.model_present(key)
+                   else preflight.no_room_for_models([key]))
+        if no_room:
+            self._model_fetch_error = (key, no_room)
+            self._refresh_model_state()
+            return
+
+        self._model_fetch_error = None
+        self._model_download = pipeline.ModelDownload(self.bridge, key)
+        self.model_badge.set("save", T.ACCENT)
+        self.model_state_label.config(text=f"Downloading '{key}'…")
+        self.model_detail.config(text="Connecting…")
+        self.model_btn.config(text="Cancel", kind="ghost", icon_name="stop",
+                              state="normal")
+        self.model_btn.grid()
+        self.model_bar.set(None)
+        self.model_percent.config(text="")
+        self.model_progress.grid()
+        self._model_download.start()
+
+    def _on_model_fetch(self, event):
+        download = self._model_download
+        if (download is None or download.cancelled
+                or event.model != download.model_name):
+            return
+        if event.step:
+            self.model_state_label.config(text=event.step)
+        if event.total:
+            fraction = min(1.0, event.done / event.total)
+            self.model_bar.set(fraction)
+            self.model_percent.config(text=f"{fraction * 100:.0f} %")
+        else:                                # connecting, unpacking
+            self.model_bar.set(None)
+            self.model_percent.config(text="")
+        self.model_detail.config(text=_transfer_text(event) if event.done else "")
+
+    def _on_model_fetch_ended(self, event):
+        self._model_download = None
+        if event.error:
+            self._model_fetch_error = (event.model, event.error)
+            self.status.set("model download failed", T.DANGER)
+        elif event.cancelled:
+            self.status.set("model download cancelled", T.TEXT_MUTE)
+        else:
+            self.status.set(f"model '{event.model}' downloaded", T.OK)
+        self._refresh_model_state()
 
     def _toggle_key(self):
         self._key_visible = not self._key_visible
@@ -1113,11 +1335,21 @@ class RecorderApp:
     def _tick(self):
         if self._shutting_down:
             return
+        # Called directly (the tests do), it would start a second ticker that
+        # on_close no longer knows about - and that fires into a closed window.
+        if self._meter_after_id is not None:
+            self.root.after_cancel(self._meter_after_id)
+            self._meter_after_id = None
         mic_gain = 10.0 ** (self.settings.mic_gain_db / 20.0)
         sys_gain = 10.0 ** (self.settings.loop_gain_db / 20.0)
         self.mic_meter.set_level(self.engine.mic_level * mic_gain)
         self.sys_meter.set_level(self.engine.sys_level * sys_gain)
         self.status.tick(METER_INTERVAL_MS / 1000.0)
+        self.model_bar.tick(METER_INTERVAL_MS / 1000.0)
+        now = time.monotonic()
+        if now - self._save_checked_at >= SAVE_CHECK_INTERVAL_S:
+            self._save_checked_at = now
+            self._refresh_save_button()
         for kind, message in self.engine.new_stream_errors():
             self._report_stream_error(kind, message)
 
@@ -1177,6 +1409,8 @@ class RecorderApp:
             self.live.cancel()
         if self._prefetch is not None:
             self._prefetch.cancel()
+        if self._model_download is not None:
+            self._model_download.cancel()
         if self.finalizer is not None:
             self.finalizer.cancel()
 
@@ -1215,15 +1449,47 @@ def _engine_summary(model, language):
     return f"{engine} · {spoken}"
 
 
+def _transfer_text(event):
+    """'191 MB of 465 MB · 13.5 MB/s · about 20 s left' for a ModelFetch."""
+    if not event.total:
+        return f"{_megabytes(event.done)} so far"
+    parts = [f"{_megabytes(event.done)} of {_megabytes(event.total)}"]
+    if event.rate > 0:
+        parts.append(f"{event.rate / (1 << 20):.1f} MB/s")
+        if event.done < event.total:
+            left = (event.total - event.done) / event.rate
+            parts.append(f"about {_eta(left)} left")
+    return " · ".join(parts)
+
+
+def _megabytes(num_bytes):
+    """In the units of the model list (and of the download log): 2^20 bytes."""
+    if num_bytes >= 1 << 30:
+        return f"{num_bytes / (1 << 30):.2f} GB"
+    return f"{num_bytes / (1 << 20):.0f} MB"
+
+
+def _eta(seconds):
+    if seconds < 60:
+        return f"{max(1, round(seconds))} s"
+    minutes = round(seconds / 60)
+    if minutes < 60:
+        return f"{minutes} min"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} h {minutes} min"
+
+
 def _combo(parent, values):
     return ttk.Combobox(parent, state="readonly", style="Dark.TCombobox",
                         font=T.fonts["body"], values=values)
 
 
-def _index_of(choices, value):
-    for index, (_label, code) in enumerate(choices):
-        if code == value:
-            return index
+def _index_of(choices, value, fallback=None):
+    """Where `value` sits in `choices`; else where `fallback` does, else 0."""
+    codes = [code for _label, code in choices]
+    for candidate in (value, fallback):
+        if candidate in codes:
+            return codes.index(candidate)
     return 0
 
 

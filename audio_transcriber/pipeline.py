@@ -18,6 +18,7 @@ covered_s and are merged through the same diarize pass as before.
 import os
 import shutil
 import threading
+import time
 from dataclasses import replace
 
 import numpy as np
@@ -25,8 +26,10 @@ import soundfile as sf
 
 from . import diarize, paths
 from .audio import capture, dsp
-from .events import Failed, Finished, Log, Progress, Status
+from .events import (Failed, Finished, Log, ModelFetch, ModelFetchEnded,
+                     Progress, Status)
 from .paths import TMP_DIR
+from .transcribe import binaries
 from .transcribe.base import TranscriptionError, format_timestamp
 from .transcribe.elevenlabs import ElevenLabsBackend
 from .transcribe.whispercpp import WhisperCppBackend
@@ -450,6 +453,91 @@ class ModelPrefetch:
                 self.bridge.post(Log(
                     f"Note: the model could not be fetched in the background "
                     f"({exc}); it is tried again when the recording ends.\n"))
+
+
+# ----------------------------------------------------------------------
+class ModelDownload:
+    """Fetches a local model on request - the Download button on the Settings tab.
+
+    Without it a model came only with the first recording that needed it, and
+    nothing showed whether it was there. This fetches what that recording
+    would: whisper.cpp itself where the app can (Windows), then the model. The
+    per-file locks in binaries.py make a recording started meanwhile wait for
+    this download instead of starting a second one.
+
+    Reports through ModelFetch events (throttled, so a 3 GB model does not
+    flood the window) and exactly one ModelFetchEnded.
+    """
+
+    REPORT_INTERVAL_S = 0.1
+
+    def __init__(self, bridge, model_name, fetch_engine=None, fetch_model=None,
+                 engine_needed=None):
+        self.bridge = bridge
+        self.model_name = model_name
+        self._fetch_engine = fetch_engine or binaries.ensure_whisper_binary
+        self._fetch_model = fetch_model or binaries.ensure_model
+        # Only where whisper.cpp can be fetched at all and is not there yet.
+        self._engine_needed = engine_needed or (
+            lambda: (binaries.local_engine_problem() is None
+                     and binaries.find_whisper_executable() is None))
+        self._cancelled = threading.Event()
+        self._thread = None
+        self._current_step = ""
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run, name="model-download",
+                                        daemon=True)
+        self._thread.start()
+        return self._thread
+
+    def cancel(self):
+        """Ends the download between two blocks; ModelFetchEnded follows."""
+        self._cancelled.set()
+
+    @property
+    def cancelled(self):
+        return self._cancelled.is_set()
+
+    def _run(self):
+        try:
+            if self._engine_needed():
+                self._fetch_engine(log=self._step, cancelled=self._cancelled.is_set,
+                                   on_bytes=self._reporter())
+            self._fetch_model(self.model_name, log=self._step,
+                              cancelled=self._cancelled.is_set,
+                              on_bytes=self._reporter(
+                                  binaries.MODEL_SIZE_BYTES.get(self.model_name, 0)))
+        except Exception as exc:
+            if self._cancelled.is_set():
+                self.bridge.post(ModelFetchEnded(self.model_name, cancelled=True))
+            else:
+                self.bridge.post(ModelFetchEnded(self.model_name, error=str(exc)))
+            return
+        self.bridge.post(ModelFetchEnded(self.model_name,
+                                         cancelled=self._cancelled.is_set()))
+
+    def _step(self, message):
+        """A log line of binaries.py - 'Downloading…', 'Extracting archive…'."""
+        self._current_step = message.strip()
+        self.bridge.post(ModelFetch(self.model_name, self._current_step))
+
+    def _reporter(self, expected_total=0):
+        """on_bytes for one file: posts at most every REPORT_INTERVAL_S."""
+        started = time.monotonic()
+        last = [0.0]
+
+        def report(done, total):
+            now = time.monotonic()
+            total = total or expected_total
+            if now - last[0] < self.REPORT_INTERVAL_S and done != total:
+                return
+            last[0] = now
+            rate = done / max(1e-6, now - started)
+            self.bridge.post(ModelFetch(self.model_name,
+                                        self._current_step,
+                                        done=done, total=total, rate=rate))
+        return report
 
 
 # ----------------------------------------------------------------------

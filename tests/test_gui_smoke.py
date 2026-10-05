@@ -422,7 +422,7 @@ class TestControlStates(unittest.TestCase):
     def _change_the_settings_in_the_window(self):
         """What moving to the Settings tab and pressing 'Save settings' does
         to the live object (without writing the file)."""
-        self.app.lang_combo.current(3)                    # Turkish
+        self.app.lang_combo.current(7)                    # Turkish
         self.app.model_combo.current(6)                   # large-v3
         self.app.api_entry.insert(0, "another-key")
         self.app._sync_settings_from_ui()
@@ -1169,6 +1169,260 @@ class TestTranscriptProgressLine(unittest.TestCase):
         t.set_transcript("[00:01] [You]: Hello")
         t.append("next\n")
         self.assertEqual(self._content(), "[00:01] [You]: Hello\nnext\n")
+
+
+@unittest.skipUnless(_can_open_window(), "no graphical display available")
+class TestSaveButton(unittest.TestCase):
+    """'Save settings' is grey once saved and lights up again on a change."""
+
+    def setUp(self):
+        from unittest.mock import patch
+        from audio_transcriber import config
+        from audio_transcriber.audio.capture import AudioEngine
+        from audio_transcriber.ui import icons
+
+        icons._ICON_CACHE.clear()
+        self.out_dir = tempfile.mkdtemp()
+        self.loaded = (config.Settings(output_dir=self.out_dir,
+                                       live_transcribe=False,
+                                       live_preview=False), [])
+        self.patches = [
+            patch.object(config, "load", side_effect=lambda: self.loaded),
+            patch.object(config, "save", return_value=[]),
+            patch.object(AudioEngine, "configure", return_value=[]),
+        ]
+        self.save = [patcher.start() for patcher in self.patches][1]
+        self.app = None
+
+    def tearDown(self):
+        import shutil
+        from audio_transcriber.ui import icons
+        if self.app is not None:
+            self.app.on_close()
+        for patcher in self.patches:
+            patcher.stop()
+        icons._ICON_CACHE.clear()
+        shutil.rmtree(self.out_dir, ignore_errors=True)
+
+    def _build(self):
+        from audio_transcriber.ui.app import RecorderApp
+        self.root = tk.Tk()
+        self.root.withdraw()
+        self.app = RecorderApp(self.root)
+        self.app._monitor_thread = None
+        return self.app
+
+    def _state(self):
+        self.app._refresh_save_button()
+        return str(self.app.save_settings_btn["state"])
+
+    def test_nothing_changed_since_the_start_means_nothing_to_save(self):
+        self._build()
+        self.assertEqual(self._state(), "disabled")
+
+    def test_a_change_lights_it_up_and_saving_greys_it_again(self):
+        app = self._build()
+        app.gpu_var.set(not app.gpu_var.get())
+        self.assertEqual(self._state(), "normal")
+        app.save_settings_btn.invoke()
+        self.save.assert_called_once()
+        self.assertEqual(self._state(), "disabled")
+
+    def test_changing_it_back_is_no_change(self):
+        app = self._build()
+        chosen = app.lang_combo.current()
+        app.lang_combo.current(chosen + 1)
+        self.assertEqual(self._state(), "normal")
+        app.lang_combo.current(chosen)
+        self.assertEqual(self._state(), "disabled")
+
+    def test_every_kind_of_setting_counts(self):
+        app = self._build()
+        changes = (
+            lambda: app.output_dir_entry.insert(tk.END, "x"),
+            lambda: app.filename_entry.insert(tk.END, "x"),
+            lambda: app.mic_gain.set(3.0),
+            # The key field takes input only while the cloud engine is chosen.
+            lambda: (app.model_combo.current(0), app._refresh_key_state()),
+            lambda: app.api_entry.insert(0, "key"),
+        )
+        for change in changes:
+            with self.subTest(change=change):
+                saved = app._settings_in_window()
+                change()
+                self.assertEqual(self._state(), "normal")
+                app._saved_settings = app._settings_in_window()
+                self.assertNotEqual(saved, app._saved_settings)
+
+    def test_a_failed_save_leaves_it_in_colour(self):
+        from unittest.mock import patch
+        app = self._build()
+        app.gpu_var.set(not app.gpu_var.get())
+        self.save.side_effect = OSError("disk full")
+        with patch("audio_transcriber.ui.app.messagebox"):
+            app.save_settings_btn.invoke()
+        self.assertEqual(self._state(), "normal")
+
+    def test_a_settings_file_that_had_to_be_corrected_is_worth_saving(self):
+        self.loaded = (self.loaded[0], ["Setting 'model_index' was invalid."])
+        self._build()
+        self.assertEqual(self._state(), "normal")
+
+
+@unittest.skipUnless(_can_open_window(), "no graphical display available")
+class TestModelPanel(unittest.TestCase):
+    """The Settings tab says whether the local model is here, and fetches it."""
+
+    def setUp(self):
+        from unittest.mock import patch
+        from audio_transcriber import config
+        from audio_transcriber.audio.capture import AudioEngine
+        from audio_transcriber.transcribe import binaries
+        from audio_transcriber.ui import icons
+        from audio_transcriber.ui.app import RecorderApp
+
+        icons._ICON_CACHE.clear()
+        self.present = set()
+        self.engine = "whisper-cli.exe"
+        settings = config.Settings(model="small", live_transcribe=False,
+                                   live_preview=False)
+        self.patches = [
+            patch.object(config, "load", return_value=(settings, [])),
+            patch.object(AudioEngine, "configure", return_value=[]),
+            # Not this machine's models, nor a real download.
+            patch.object(binaries, "model_present",
+                         lambda name: name in self.present),
+            patch.object(binaries, "find_whisper_executable",
+                         lambda *a, **k: self.engine),
+            patch.object(binaries, "local_engine_problem", lambda *a, **k: None),
+            patch("audio_transcriber.ui.app.preflight.no_room_for_models",
+                  return_value=None),
+            patch("audio_transcriber.ui.app.pipeline.ModelDownload"),
+        ]
+        self.download = [patcher.start() for patcher in self.patches][-1]
+        self.root = tk.Tk()
+        self.root.withdraw()
+        self.app = RecorderApp(self.root)
+        self.app._monitor_thread = None
+
+    def tearDown(self):
+        from audio_transcriber.ui import icons
+        self.app.on_close()
+        for patcher in self.patches:
+            patcher.stop()
+        icons._ICON_CACHE.clear()
+
+    def _choose(self, key):
+        from audio_transcriber import config
+        self.app.model_combo.current(config.model_index(key))
+        self.app.model_combo.event_generate("<<ComboboxSelected>>")
+        self.root.update()
+
+    def _shown(self, widget):
+        return bool(widget.winfo_manager())
+
+    def _title(self):
+        return self.app.model_state_label.cget("text")
+
+    def test_a_missing_model_says_so_and_offers_the_download(self):
+        self.app._refresh_model_state()
+        self.assertEqual(self._title(), "Not downloaded")
+        self.assertIn("'small'", self.app.model_detail.cget("text"))
+        self.assertTrue(self._shown(self.app.model_btn))
+        self.assertEqual(self.app.model_btn["text"], "Download")
+
+    def test_a_model_that_is_here_says_so_and_needs_no_button(self):
+        self.present.add("small")
+        self.app._refresh_model_state()
+        self.assertEqual(self._title(), "Downloaded")
+        self.assertFalse(self._shown(self.app.model_btn))
+
+    def test_the_model_list_marks_what_is_downloaded(self):
+        self.present.add("base")
+        self.app._refresh_model_state()
+        values = self.app.model_combo["values"]
+        marked = [value for value in values if "downloaded" in value]
+        self.assertEqual(len(marked), 1)
+        self.assertTrue(marked[0].startswith("base"))
+        self.assertTrue(self.app.model_combo.get().startswith("small"),
+                        "the chosen model stays chosen")
+
+    def test_without_whisper_cpp_it_is_not_ready_yet(self):
+        self.present.add("small")
+        self.engine = None
+        self.app._refresh_model_state()
+        self.assertEqual(self._title(), "Almost ready")
+        self.assertTrue(self._shown(self.app.model_btn))
+
+    def test_the_cloud_has_no_model_to_show(self):
+        from audio_transcriber import config
+        self._choose(config.CLOUD_MODEL)
+        self.assertFalse(self._shown(self.app.model_panel))
+        self._choose("tiny")
+        self.assertTrue(self._shown(self.app.model_panel))
+
+    def test_download_shows_the_progress_and_ends_ready(self):
+        from audio_transcriber.events import ModelFetch, ModelFetchEnded
+        self.download.return_value.model_name = "small"
+        self.download.return_value.cancelled = False
+        self.app.model_btn.invoke()
+
+        self.download.assert_called_once_with(self.app.bridge, "small")
+        self.download.return_value.start.assert_called_once()
+        self.assertTrue(self._shown(self.app.model_progress))
+        self.assertEqual(self.app.model_btn["text"], "Cancel")
+        self.assertIsNone(self.app.model_bar.fraction, "connecting: no length yet")
+
+        mb = 1 << 20
+        self.app.bridge.post(ModelFetch("small", "Downloading model 'small'…",
+                                        done=250 * mb, total=500 * mb,
+                                        rate=25 * mb))
+        self.app.bridge.drain_now()
+        self.assertAlmostEqual(self.app.model_bar.fraction, 0.5)
+        self.assertEqual(self.app.model_percent.cget("text"), "50 %")
+        self.assertEqual(self.app.model_detail.cget("text"),
+                         "250 MB of 500 MB · 25.0 MB/s · about 10 s left")
+
+        self.present.add("small")
+        self.app.bridge.post(ModelFetchEnded("small"))
+        self.app.bridge.drain_now()
+        self.assertEqual(self._title(), "Downloaded")
+        self.assertFalse(self._shown(self.app.model_progress))
+        self.assertIsNone(self.app._model_download)
+
+    def test_the_button_cancels_a_running_download(self):
+        from audio_transcriber.events import ModelFetchEnded
+        self.app.model_btn.invoke()
+        self.app.model_btn.invoke()
+        self.download.return_value.cancel.assert_called_once()
+        self.assertEqual(self._title(), "Cancelling…")
+
+        self.app.bridge.post(ModelFetchEnded("small", cancelled=True))
+        self.app.bridge.drain_now()
+        self.assertEqual(self._title(), "Not downloaded")
+
+    def test_a_failed_download_says_why_and_offers_another_try(self):
+        from audio_transcriber.events import ModelFetchEnded
+        self.app.model_btn.invoke()
+        self.app.bridge.post(ModelFetchEnded("small", error="could not connect"))
+        self.app.bridge.drain_now()
+        self.assertEqual(self._title(), "Download failed")
+        self.assertIn("could not connect", self.app.model_detail.cget("text"))
+        self.assertEqual(self.app.model_btn["text"], "Try again")
+
+    def test_no_room_means_no_download(self):
+        from unittest.mock import patch
+        with patch("audio_transcriber.ui.app.preflight.no_room_for_models",
+                   return_value="Not enough free space for the model 'small'"):
+            self.app.model_btn.invoke()
+        self.download.assert_not_called()
+        self.assertEqual(self._title(), "Download failed")
+
+    def test_closing_the_window_cancels_the_download(self):
+        self.app.model_btn.invoke()
+        self.app.on_close()
+        self.download.return_value.cancel.assert_called_once()
+        self.app.on_close = lambda: None              # already closed
 
 
 if __name__ == "__main__":

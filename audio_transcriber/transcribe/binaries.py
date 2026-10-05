@@ -123,10 +123,12 @@ def sha256_of(path, chunk=1 << 20):
 
 
 def download(url, dest_path, description="File", progress=None,
-             timeout=CONNECT_TIMEOUT, cancelled=None):
+             timeout=CONNECT_TIMEOUT, cancelled=None, on_bytes=None):
     """Download atomically to dest_path.
 
     progress: callable(text) for progress messages (may be None).
+    on_bytes: callable(downloaded, total) after every block, for a progress bar;
+    total is 0 while the server has not said how much is coming.
     cancelled: callable() -> bool, asked between blocks; True ends the download
     with a DownloadError and removes the partial file.
     Raises DownloadError.
@@ -160,6 +162,8 @@ def download(url, dest_path, description="File", progress=None,
                         break
                     out.write(buffer)
                     downloaded += len(buffer)
+                    if on_bytes is not None:
+                        on_bytes(downloaded, total)
 
                     now = time.monotonic()
                     if progress and (now - last_report > 0.4 or downloaded == total):
@@ -260,7 +264,7 @@ def local_engine_problem(which=shutil.which, windows=None):
     return NO_WHISPER_HINT.format(bin_dir=BIN_DIR)
 
 
-def ensure_whisper_binary(progress=None, log=None, cancelled=None):
+def ensure_whisper_binary(progress=None, log=None, cancelled=None, on_bytes=None):
     """Make sure whisper-cli (whisper-cli.exe on Windows) is available."""
     found = find_whisper_executable()
     if found:
@@ -278,7 +282,7 @@ def ensure_whisper_binary(progress=None, log=None, cancelled=None):
         if log:
             log("Downloading whisper.cpp…\n")
         download(WHISPER_ZIP_URL, zip_path, "whisper.cpp", progress,
-                 cancelled=cancelled)
+                 cancelled=cancelled, on_bytes=on_bytes)
 
         try:
             if log:
@@ -315,7 +319,7 @@ def model_present(name):
     return _usable(model_path(name), 1 << 20)
 
 
-def ensure_model(name, progress=None, log=None, cancelled=None):
+def ensure_model(name, progress=None, log=None, cancelled=None, on_bytes=None):
     """Make sure the ggml model is present."""
     path = model_path(name)
     if _usable(path, 1 << 20):
@@ -330,7 +334,8 @@ def ensure_model(name, progress=None, log=None, cancelled=None):
         if log:
             log(f"Downloading model '{name}'…\n")
         return download(MODEL_URL_TEMPLATE.format(name=name), path,
-                        f"Whisper model '{name}'", progress, cancelled=cancelled)
+                        f"Whisper model '{name}'", progress, cancelled=cancelled,
+                        on_bytes=on_bytes)
 
 
 def ensure_vad_model(progress=None, log=None, cancelled=None):
