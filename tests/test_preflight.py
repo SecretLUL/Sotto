@@ -203,13 +203,13 @@ class TestDiskSpace(PreflightCase):
         self.assertEqual(self.check(), [])
 
     def test_little_room_is_a_warning_that_says_how_long_it_lasts(self):
-        self.free[paths.TMP_DIR] = int(1.5 * GIB)       # 1.5 / 0.9 per hour
+        self.free[paths.TMP_DIR] = int(1.5 * GIB)       # 1.5 / 1.2 per hour
         warnings = texts(self.check(), preflight.WARNING)
         self.assertEqual(len(warnings), 1)
-        self.assertIn("1 h 40 min", warnings[0])
+        self.assertIn("1 h 15 min", warnings[0])
 
     def test_less_than_an_hour_is_given_in_minutes(self):
-        self.free[paths.TMP_DIR] = int(0.45 * GIB)      # half an hour
+        self.free[paths.TMP_DIR] = int(0.6 * GIB)       # half an hour
         warnings = texts(self.check(), preflight.WARNING)
         self.assertIn("30 min", warnings[0])
         self.assertNotIn(" h ", warnings[0])
@@ -224,10 +224,10 @@ class TestDiskSpace(PreflightCase):
 
     def test_the_tighter_of_the_two_folders_decides(self):
         self.free[paths.TMP_DIR] = 200 * GB
-        self.free[self.out] = int(1.0 * GIB)
+        self.free[self.out] = int(1.4 * GIB)
         warnings = texts(self.check(), preflight.WARNING)
         self.assertEqual(len(warnings), 1)
-        self.assertIn("1 h 7 min", warnings[0])
+        self.assertIn("1 h 10 min", warnings[0])
 
     def test_an_upload_is_not_a_recording(self):
         self.free[paths.TMP_DIR] = 200 * 10 ** 6

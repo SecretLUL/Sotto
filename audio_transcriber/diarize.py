@@ -26,7 +26,7 @@ favour of the other party.
 """
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 
 from .audio import dsp
@@ -113,6 +113,14 @@ class _TrackContext:
             return None
         return dsp.segment_rms(self.audio, start, end, self.rate) / self.reference
 
+    def span(self, start, end, other=None, bleed_margin_db=BLEED_MARGIN_DB):
+        """Where the speech of a segment is on this track (dsp.speech_span),
+        leaving out what is only crosstalk from the `other` track."""
+        return dsp.speech_span(self.audio, start, end, self.reference, self.rate,
+                               other=other.audio if other else None,
+                               other_reference=other.reference if other else 0.0,
+                               bleed_margin_db=bleed_margin_db)
+
 
 # ----------------------------------------------------------------------
 def merge(mic_segments, sys_segments, mic_audio=None, sys_audio=None,
@@ -134,16 +142,24 @@ def merge(mic_segments, sys_segments, mic_audio=None, sys_audio=None,
             if not text:
                 continue
 
-            # Widen the window slightly: whisper segment boundaries are
-            # accurate to about 100 ms, and too narrow a window measures the
-            # wrong place.
-            win_start = max(0.0, segment.start - 0.05)
-            win_end = max(segment.end, segment.start + min_segment_s) + 0.05
-
-            own_ratio = own.ratio(win_start, win_end)
+            own_ratio = own.ratio(*_window(segment, min_segment_s))
             if own_ratio is not None and own_ratio < silence_floor:
                 report.dropped_silence += 1
                 continue
+
+            # From here on the segment is where it is actually spoken. whisper
+            # hands a long pause to the sentence after it: the line was dated
+            # to the end of the previous one, and a short answer after a long
+            # turn of the other party was measured mostly over that turn - and
+            # dropped as crosstalk. The silence check above keeps the whole
+            # window: narrowed to a cough, a line made up over the pause would
+            # pass it. Only the microphone hears the other side, so only there
+            # does crosstalk have to be told apart (see DUPLICATE_TIE_WINNER).
+            start, end = own.span(segment.start, segment.end,
+                                  other if track == "mic" else None,
+                                  bleed_margin_db)
+            segment = replace(segment, start=start, end=end)
+            win_start, win_end = _window(segment, min_segment_s)
 
             own_db = own.normalized_db(win_start, win_end)
             other_db = other.normalized_db(win_start, win_end)
@@ -215,6 +231,14 @@ def render(report, header=None):
 
 
 # ----------------------------------------------------------------------
+def _window(segment, min_segment_s):
+    """The window a segment's level is measured over. Slightly wider than the
+    segment: its boundaries are accurate to about 100 ms, and too narrow a
+    window measures the wrong place."""
+    return (max(0.0, segment.start - 0.05),
+            max(segment.end, segment.start + min_segment_s) + 0.05)
+
+
 def _overlaps(a, b, tolerance=0.6):
     return a.start < b.end + tolerance and b.start < a.end + tolerance
 

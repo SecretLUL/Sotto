@@ -258,6 +258,65 @@ def segment_rms(x, t_start, t_end, rate=TARGET_RATE):
     return rms(x[i_start:i_end])
 
 
+# A frame counts as speech from this far below the track's typical speech
+# level on - if it is part of a run at least SPEECH_MIN_S long, which a click
+# or a keystroke is not. Measured on a real recording: a click just before a
+# video started, and a 60 ms noise a second later, were as loud as speech.
+SPEECH_FRAME_S = 0.02
+SPEECH_RATIO_DB = -20.0
+SPEECH_MIN_S = 0.15
+# The soft beginning and end of a word lie just outside its loud frames. Not
+# more: the transcript shows whole seconds, rounded down, and a sentence that
+# starts at 12.05 s would read [00:11].
+SPEECH_MARGIN_S = 0.1
+
+
+def speech_span(x, t_start, t_end, reference, rate=TARGET_RATE,
+                other=None, other_reference=0.0, bleed_margin_db=8.0):
+    """Where speech actually is inside [t_start, t_end): (first, last) second.
+
+    whisper hands the silence before a sentence to that sentence. In a test
+    recording a video started 12 s in and its first line came back as
+    0.00 -> 14.14 s; an answer after a long pause starts where the line
+    before it ended. The window is narrowed to its first and last stretch of
+    speech on this track, plus a margin for the soft edges of the words.
+
+    `reference` is the track's typical speech level (reference_level()), so
+    like everything else here this works on levels relative to the track.
+    Given the other track, a frame that is more than `bleed_margin_db`
+    quieter than the other track at that moment is crosstalk, not speech: a
+    sensitive microphone picks up the headphones - in that recording the
+    video, at -25 dB, all the while you were silent.
+
+    Without speech in the window it comes back unchanged.
+    """
+    if x is None or len(x) == 0 or reference <= SILENCE_FLOOR or t_end <= t_start:
+        return t_start, t_end
+    first = max(0, int(t_start * rate))
+    last = min(len(x), int(math.ceil(t_end * rate)))
+    frame = max(1, int(round(rate * SPEECH_FRAME_S)))
+    levels = frame_rms(x[first:last], frame) / reference
+    need = max(1, int(round(SPEECH_MIN_S / SPEECH_FRAME_S)))
+    if levels.size < need:
+        return t_start, t_end
+
+    loud = levels >= 10.0 ** (SPEECH_RATIO_DB / 20.0)
+    if other is not None and other_reference > SILENCE_FLOOR:
+        theirs = np.zeros(levels.size, dtype=np.float32)
+        measured = frame_rms(other[first:last], frame) / other_reference
+        theirs[:min(levels.size, measured.size)] = measured[:levels.size]
+        loud &= levels >= theirs * 10.0 ** (-bleed_margin_db / 20.0)
+
+    loud = loud.astype(np.int32)
+    runs = np.flatnonzero(np.convolve(loud, np.ones(need, dtype=np.int32), "valid") == need)
+    if runs.size == 0:
+        return t_start, t_end
+    onset = (first + runs[0] * frame) / float(rate)
+    offset = (first + (runs[-1] + need) * frame) / float(rate)
+    return (max(t_start, onset - SPEECH_MARGIN_S),
+            min(t_end, offset + SPEECH_MARGIN_S))
+
+
 # ----------------------------------------------------------------------
 # Level adjustment
 # ----------------------------------------------------------------------

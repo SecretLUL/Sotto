@@ -515,6 +515,106 @@ def load_track(track_result, target_rate=dsp.TARGET_RATE):
 
 
 # ----------------------------------------------------------------------
+# The copy you listen to
+# ----------------------------------------------------------------------
+MIX_BLOCK_S = 10.0
+
+
+def write_mixdown(recording, path, mic_gain_db=0.0, sys_gain_db=0.0,
+                  ceiling=0.95):
+    """Write both tracks mixed into one mono file at their full rate.
+
+    This file is only there to be listened to - recognition works on its own
+    16 kHz copies of the raw tracks. It used to be written at those 16 kHz as
+    well, with the microphone on the left and the system audio on the right:
+    everything above 8 kHz was gone and each voice was in one ear only. Mono
+    puts both voices in the middle.
+
+    The rate is that of the faster track, so neither loses anything; a slower
+    one is resampled up to it. Like load_track(), a track that started later
+    is moved back by its start offset. The file is written chunk by chunk:
+    an hour at 48 kHz would be 700 MB in memory. That takes two passes - the
+    first finds the loudest point, the second writes with the level lowered
+    just as far as needed to keep that point from clipping.
+
+    Returns (rate, frames) of the written file.
+    """
+    tracks = [(track, gain_db) for track, gain_db in
+              ((recording.mic, mic_gain_db), (recording.sys, sys_gain_db))
+              if track is not None and os.path.exists(track.path)]
+    rate = max((track.rate for track, _gain in tracks), default=dsp.TARGET_RATE)
+
+    def mixed():
+        return _mix([_offset_track(track, rate, gain_db)
+                     for track, gain_db in tracks], int(MIX_BLOCK_S * rate))
+
+    peak = 0.0
+    for block in mixed():
+        peak = max(peak, float(np.max(np.abs(block))))
+    scale = ceiling / peak if peak > ceiling else 1.0
+
+    frames = 0
+    with sf.SoundFile(path, mode="w", samplerate=rate, channels=1,
+                      subtype="PCM_16") as target:
+        for block in mixed():
+            target.write(block * scale if scale != 1.0 else block)
+            frames += len(block)
+    return rate, frames
+
+
+def _offset_track(track, rate, gain_db):
+    """A raw track at `rate`, behind its start offset, with its gain applied."""
+    pad = int(round(track.start_offset_s * rate))
+    block = int(MIX_BLOCK_S * rate)
+    while pad > 0:
+        yield np.zeros(min(pad, block), dtype=np.float32)
+        pad -= block
+    for chunk in stream.iter_mono_resampled(track.path, rate):
+        yield dsp.apply_gain(chunk, gain_db)
+
+
+def _mix(sources, block):
+    """Add up chunk streams of different lengths, `block` samples at a time.
+    A stream that has ended counts as silence until the longest one ends."""
+    readers = [_BlockReader(source) for source in sources]
+    while True:
+        parts = [reader.take(block) for reader in readers]
+        length = max((len(part) for part in parts), default=0)
+        if length == 0:
+            return
+        out = np.zeros(length, dtype=np.float32)
+        for part in parts:
+            out[:len(part)] += part
+        yield out
+
+
+class _BlockReader:
+    """Hands out a chunk stream in pieces of a chosen length."""
+
+    def __init__(self, chunks):
+        self._chunks = iter(chunks)
+        self._rest = np.zeros(0, dtype=np.float32)
+
+    def take(self, count):
+        """The next `count` samples - fewer only once the stream has ended."""
+        parts, have = [], 0
+        while have < count:
+            if len(self._rest) == 0:
+                self._rest = next(self._chunks, None)
+                if self._rest is None:
+                    self._rest = np.zeros(0, dtype=np.float32)
+                    break
+                continue
+            part = self._rest[:count - have]
+            self._rest = self._rest[len(part):]
+            parts.append(part)
+            have += len(part)
+        if not parts:
+            return np.zeros(0, dtype=np.float32)
+        return parts[0] if len(parts) == 1 else np.concatenate(parts)
+
+
+# ----------------------------------------------------------------------
 # Recordings that were interrupted
 # ----------------------------------------------------------------------
 _RAW_NAME = re.compile(r"^(?P<base>.+)\.(?P<kind>mic|sys)\.raw\.wav$")

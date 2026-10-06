@@ -124,6 +124,101 @@ class TestTrackLoading(unittest.TestCase):
         self.assertAlmostEqual(result.duration_s, 2.0)
 
 
+class TestMixdown(unittest.TestCase):
+    """The .wav next to the transcript: the copy you listen to."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.out = os.path.join(self.dir, "mix.wav")
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _track(self, kind, data, rate=RATE, offset=0.0):
+        path = os.path.join(self.dir, f"session.{kind}.raw.wav")
+        sf.write(path, np.asarray(data, dtype=np.float32), rate, subtype="PCM_16")
+        return capture.TrackResult(path=path, rate=rate, frames=len(data),
+                                   start_offset_s=offset)
+
+    @staticmethod
+    def _tone(freq, seconds, rate=RATE, amplitude=0.3):
+        t = np.arange(int(seconds * rate)) / rate
+        return amplitude * np.sin(2 * np.pi * freq * t)
+
+    def _write(self, mic=None, sys=None, **gains):
+        recording = capture.RecordingResult(mic=mic, sys=sys)
+        rate, frames = capture.write_mixdown(recording, self.out, **gains)
+        data, file_rate = sf.read(self.out, dtype="float32", always_2d=True)
+        self.assertEqual((file_rate, len(data)), (rate, frames))
+        return data, file_rate
+
+    def test_both_voices_in_one_mono_file(self):
+        """They used to be split: microphone left, system audio right."""
+        data, _rate = self._write(
+            mic=self._track("mic", np.r_[self._tone(440, 1.0), np.zeros(RATE)]),
+            sys=self._track("sys", np.r_[np.zeros(RATE), self._tone(440, 1.0)]))
+        self.assertEqual(data.shape[1], 1)
+        first, second = data[:RATE, 0], data[RATE:, 0]
+        self.assertAlmostEqual(dsp.rms(first), dsp.rms(second), places=2)
+        self.assertGreater(dsp.rms(first), 0.15)
+
+    def test_the_full_rate_is_kept(self):
+        """At 16 kHz everything above 8 kHz was gone."""
+        data, rate = self._write(mic=self._track("mic", self._tone(12000, 1.0)))
+        self.assertEqual(rate, RATE)
+        self.assertGreater(dsp.rms(data[:, 0]), 0.15)
+
+    def test_a_slower_track_is_resampled_to_the_faster_one(self):
+        data, rate = self._write(
+            mic=self._track("mic", self._tone(440, 2.0, rate=44100), rate=44100),
+            sys=self._track("sys", self._tone(440, 1.0)))
+        self.assertEqual(rate, RATE)
+        self.assertAlmostEqual(len(data) / rate, 2.0, places=2)
+
+    def test_a_track_that_started_later_moves_back(self):
+        data, rate = self._write(
+            mic=self._track("mic", self._tone(440, 0.5)),
+            sys=self._track("sys", self._tone(440, 1.0), offset=1.5))
+        pad = int(1.5 * rate)
+        np.testing.assert_allclose(data[int(0.5 * rate):pad, 0], 0.0, atol=1e-4)
+        self.assertGreater(dsp.rms(data[pad:, 0]), 0.15)
+        self.assertAlmostEqual(len(data) / rate, 2.5, places=2)
+
+    def test_the_gain_sliders_apply(self):
+        quiet, _rate = self._write(mic=self._track("mic", self._tone(440, 1.0)),
+                                   mic_gain_db=-6.0)
+        self.assertAlmostEqual(dsp.rms(quiet[:, 0]),
+                               dsp.rms(self._tone(440, 1.0)) / 2, places=2)
+
+    def test_a_loud_mix_is_lowered_but_never_raised(self):
+        loud, _rate = self._write(
+            mic=self._track("mic", self._tone(440, 1.0, amplitude=0.9)),
+            sys=self._track("sys", self._tone(440, 1.0, amplitude=0.9)))
+        self.assertLessEqual(float(np.max(np.abs(loud))), 0.951)
+        self.assertGreater(float(np.max(np.abs(loud))), 0.9)
+
+        soft, _rate = self._write(
+            mic=self._track("mic", self._tone(440, 1.0, amplitude=0.1)))
+        self.assertAlmostEqual(float(np.max(np.abs(soft))), 0.1, places=2)
+
+    def test_longer_than_one_block(self):
+        """Blocks of both tracks must line up across the block boundaries."""
+        seconds = capture.MIX_BLOCK_S * 2.5
+        tone = self._tone(440, seconds, amplitude=0.2)
+        data, rate = self._write(mic=self._track("mic", tone),
+                                 sys=self._track("sys", tone))
+        self.assertEqual(len(data), len(tone))
+        np.testing.assert_allclose(data[:, 0], 2 * tone, atol=2e-3)
+
+    def test_a_missing_track_is_left_out(self):
+        gone = capture.TrackResult(path=os.path.join(self.dir, "gone.wav"),
+                                   rate=44100, frames=0)
+        data, rate = self._write(mic=self._track("mic", self._tone(440, 1.0)),
+                                 sys=gone)
+        self.assertEqual(rate, RATE)
+        self.assertAlmostEqual(len(data) / rate, 1.0, places=2)
+
+
 class TestConfigureIsAtomic(unittest.TestCase):
     """A reconfiguration must not be observable half-done.
 

@@ -1,4 +1,4 @@
-"""Reading audio files as 16 kHz mono without holding the whole file in memory.
+"""Reading audio files as mono without holding the whole file in memory.
 
 The loaders used to read the complete file at its native rate, average the
 channels into a second copy and resample into a third: about 1.8 GB at the peak
@@ -28,18 +28,33 @@ def read_mono_resampled(path, target_rate=dsp.TARGET_RATE, chunk_s=10.0):
     """
     with sf.SoundFile(path) as source:
         rate = source.samplerate
-        frames = dsp.chunk_frames(rate, target_rate, chunk_s)
         announced = source.frames if source.frames and source.frames > 0 else 0
-
-        def chunks():
-            while True:
-                block = source.read(frames, dtype="float32", always_2d=True)
-                if len(block) == 0:
-                    return
-                yield block.mean(axis=1) if block.shape[1] > 1 else block[:, 0]
-
-        return _assemble(dsp.resample_stream(chunks(), rate, target_rate),
+        return _assemble(_resampled_chunks(source, target_rate, chunk_s),
                          -(-announced * target_rate // rate))
+
+
+def iter_mono_resampled(path, target_rate, chunk_s=10.0):
+    """The same samples as read_mono_resampled(), handed out chunk by chunk.
+
+    For a consumer that writes them straight on - the listening copy of a
+    recording at its full rate - so not even the result is held in memory.
+    """
+    with sf.SoundFile(path) as source:
+        yield from _resampled_chunks(source, target_rate, chunk_s)
+
+
+def _resampled_chunks(source, target_rate, chunk_s):
+    rate = source.samplerate
+    frames = dsp.chunk_frames(rate, target_rate, chunk_s)
+
+    def chunks():
+        while True:
+            block = source.read(frames, dtype="float32", always_2d=True)
+            if len(block) == 0:
+                return
+            yield block.mean(axis=1) if block.shape[1] > 1 else block[:, 0]
+
+    return dsp.resample_stream(chunks(), rate, target_rate)
 
 
 def _assemble(parts, expected_length):

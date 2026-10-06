@@ -230,14 +230,14 @@ class Finalizer(_Worker):
         system = _pad_to(system, length)
 
         # --- 2. Audible mixdown (with the gain sliders) -----------------
+        # From the raw tracks at their full rate, not from the 16 kHz copies
+        # above - those are for recognition only.
         mix_path = os.path.join(out_dir, f"{base_name}.wav")
-        stereo = np.column_stack([
-            dsp.limit_peak(dsp.apply_gain(mic, settings.mic_gain_db)),
-            dsp.limit_peak(dsp.apply_gain(system, settings.loop_gain_db)),
-        ])
-        sf.write(mix_path, stereo, dsp.TARGET_RATE, subtype="PCM_16")
+        mix_rate, _frames = capture.write_mixdown(
+            recording, mix_path, settings.mic_gain_db, settings.loop_gain_db)
         bridge.post(Log(f"Recording saved: {os.path.basename(mix_path)} "
-                        f"({length / dsp.TARGET_RATE:.1f} s)\n"))
+                        f"({length / dsp.TARGET_RATE:.1f} s, "
+                        f"{mix_rate / 1000:g} kHz)\n"))
 
         # --- 3. Normalise the tracks for recognition --------------------
         # Independent normalisation is safe now: speaker attribution works on
@@ -569,6 +569,9 @@ class LiveTranscriber:
 
         self.segments = {"mic": [], "sys": []}
         self.covered_s = {"mic": 0.0, "sys": 0.0}
+        # When each segment is shown as starting in the preview: where its
+        # speech begins, not where whisper put it (see dsp.speech_span).
+        self._shown_start = {"mic": [], "sys": []}
 
         self._base_name = "live"
         self._reference = {"mic": 0.0, "sys": 0.0}   # worker thread only
@@ -763,25 +766,34 @@ class LiveTranscriber:
         finally:
             _try_remove(path)
 
-        self._advance(kind, duration, _shift_all(found, start_s))
+        # Only for display. The segments go on as whisper returned them: the
+        # closing pass narrows them itself, with the other track at hand to
+        # tell crosstalk apart.
+        shown = [start_s + dsp.speech_span(mono, segment.start, segment.end,
+                                           self._reference[kind])[0]
+                 for segment in found]
+        self._advance(kind, duration, _shift_all(found, start_s), shown)
 
-    def _advance(self, kind, duration, segments):
+    def _advance(self, kind, duration, segments, shown_start=None):
         with self._lock:
             if self._sealed:
                 return
             self.covered_s[kind] += duration
             self.segments[kind].extend(segments)
+            self._shown_start[kind].extend(
+                shown_start if shown_start is not None
+                else [segment.start for segment in segments])
         if segments and self.preview:
             self._post_preview()
 
     def _post_preview(self):
         with self._lock:
             lines = [
-                (segment.start,
-                 f"{format_timestamp(segment.start)} {label}: {segment.text}")
+                (start, f"{format_timestamp(start)} {label}: {segment.text}")
                 for kind, label in (("mic", diarize.LABEL_SELF),
                                     ("sys", diarize.LABEL_OTHER))
-                for segment in self.segments[kind]
+                for segment, start in zip(self.segments[kind],
+                                          self._shown_start[kind])
             ]
         lines.sort()
         self.bridge.post(_preview_event(
@@ -824,9 +836,9 @@ class FileFinalizer(_Worker):
         if _same_file(file_path, mix_path):
             # The file picked for upload IS the output audio - a recording
             # chosen from the output folder. Converting it would replace it
-            # with a mono 16 kHz copy, which for the app's own recordings
-            # destroys the two channels (microphone left, system right) they
-            # consist of. It stays exactly as it is.
+            # with a 16 kHz copy, which for the app's own recordings throws
+            # away everything above 8 kHz they were saved with. It stays
+            # exactly as it is.
             bridge.post(Log(f"Audio file loaded: {os.path.basename(mix_path)} "
                             f"({duration_s:.1f} s) - left untouched\n"))
         else:

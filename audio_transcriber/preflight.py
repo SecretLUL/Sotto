@@ -22,9 +22,9 @@ _ORDER = {ERROR: 0, WARNING: 1, NOTE: 2}
 
 # One hour of recording takes about this much disk while it is made and
 # processed: two raw tracks (mono, 16 bit, typically 48 kHz: 0.35 GB each), the
-# 16 kHz copies made for recognition (0.12 GB) and the saved stereo mixdown
-# (0.12 GB).
-BYTES_PER_RECORDED_HOUR = int(0.9 * 2 ** 30)
+# 16 kHz copies made for recognition (0.12 GB each) and the saved mixdown (mono
+# at the rate of the raw tracks: 0.35 GB).
+BYTES_PER_RECORDED_HOUR = int(1.2 * 2 ** 30)
 
 # Below this a recording is not worth starting (about twenty minutes) ...
 MIN_FREE_BYTES = 300 * 10 ** 6
