@@ -569,6 +569,9 @@ class LiveTranscriber:
 
         self.segments = {"mic": [], "sys": []}
         self.covered_s = {"mic": 0.0, "sys": 0.0}
+        # When each segment is shown as starting in the preview: where its
+        # speech begins, not where whisper put it (see dsp.speech_span).
+        self._shown_start = {"mic": [], "sys": []}
 
         self._base_name = "live"
         self._reference = {"mic": 0.0, "sys": 0.0}   # worker thread only
@@ -763,25 +766,34 @@ class LiveTranscriber:
         finally:
             _try_remove(path)
 
-        self._advance(kind, duration, _shift_all(found, start_s))
+        # Only for display. The segments go on as whisper returned them: the
+        # closing pass narrows them itself, with the other track at hand to
+        # tell crosstalk apart.
+        shown = [start_s + dsp.speech_span(mono, segment.start, segment.end,
+                                           self._reference[kind])[0]
+                 for segment in found]
+        self._advance(kind, duration, _shift_all(found, start_s), shown)
 
-    def _advance(self, kind, duration, segments):
+    def _advance(self, kind, duration, segments, shown_start=None):
         with self._lock:
             if self._sealed:
                 return
             self.covered_s[kind] += duration
             self.segments[kind].extend(segments)
+            self._shown_start[kind].extend(
+                shown_start if shown_start is not None
+                else [segment.start for segment in segments])
         if segments and self.preview:
             self._post_preview()
 
     def _post_preview(self):
         with self._lock:
             lines = [
-                (segment.start,
-                 f"{format_timestamp(segment.start)} {label}: {segment.text}")
+                (start, f"{format_timestamp(start)} {label}: {segment.text}")
                 for kind, label in (("mic", diarize.LABEL_SELF),
                                     ("sys", diarize.LABEL_OTHER))
-                for segment in self.segments[kind]
+                for segment, start in zip(self.segments[kind],
+                                          self._shown_start[kind])
             ]
         lines.sort()
         self.bridge.post(_preview_event(

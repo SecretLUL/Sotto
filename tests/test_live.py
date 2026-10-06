@@ -281,6 +281,23 @@ class TestLiveTranscriber(unittest.TestCase):
         live.finish(timeout=20.0)
         self.assertEqual(self.bridge.of_type(LivePreview), [])
 
+    def test_the_preview_dates_a_line_where_it_is_spoken(self):
+        """whisper hands the silence before a sentence to that sentence. The
+        preview shows where the speech starts; the segment itself goes on to
+        the closing pass as it came, to be narrowed there with both tracks."""
+        self.backend.transcribe = lambda wav_path, **kwargs: [
+            Segment(start=0.0, end=sf.info(wav_path).duration, text="late line",
+                    track=kwargs.get("track", ""))]
+        live = self._live()
+        self.assertTrue(wait_for(lambda: live._backend is not None))
+        audio = np.concatenate([np.zeros(int(3.5 * RATE), np.float32), tone(1.0)])
+        live._handle_chunk("sys", audio, RATE, 10.0)
+
+        self.assertIn("[00:13] [Participant]: late line",
+                      self.bridge.of_type(LivePreview)[-1].text)
+        self.assertEqual(live.segments["sys"][0].start, 10.0)
+        live.finish(timeout=20.0)
+
     def test_nothing_is_recorded_after_the_seal(self):
         live = self._live()
         self.engine.feed("mic", speech(3.0))

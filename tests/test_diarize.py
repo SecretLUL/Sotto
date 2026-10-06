@@ -169,6 +169,69 @@ class TestHallucinationFilter(unittest.TestCase):
         self.assertEqual(report.dropped_silence, 0)
 
 
+class TestWhereItIsSpoken(unittest.TestCase):
+    """whisper hands the silence before a sentence to that sentence.
+
+    Found in a real recording: a video started 12 s in and its first line came
+    back as 0.00 -> 14.14 s, and the answer after it was dated to the end of
+    the line before it - 13 s instead of 21 s.
+    """
+
+    def test_a_line_is_dated_where_it_is_spoken(self):
+        sys = track([(12.0, 14.0, 0.2), (15.0, 19.0, 0.2)], seconds=25.0, seed=12)
+        report = diarize.merge(
+            [], [Segment(0.0, 14.14, "My last ace up the sleeve.", "sys")],
+            mic_audio=np.zeros_like(sys), sys_audio=sys)
+        self.assertEqual(len(report.lines), 1)
+        self.assertGreaterEqual(report.lines[0].start, 11.85)
+        self.assertLessEqual(report.lines[0].start, 12.0)
+
+    def test_a_short_answer_after_a_long_turn_is_not_crosstalk(self):
+        """Measured over the whole window it was mostly the other side's turn,
+        so a genuine answer was dropped as crosstalk."""
+        mic = track([(18.5, 19.0, 0.2), (25.0, 28.0, 0.2)], seconds=30.0, seed=13)
+        sys = track([(0.5, 18.0, 0.2)], seconds=30.0, seed=14)
+        report = diarize.merge(
+            [Segment(0.0, 19.2, "Yes.", "mic")],
+            [Segment(0.5, 18.0, "A long explanation.", "sys")],
+            mic_audio=mic, sys_audio=sys)
+        self.assertEqual(report.dropped_bleed, 0)
+        yes = [line for line in report.lines if line.text == "Yes."]
+        self.assertEqual(len(yes), 1)
+        self.assertAlmostEqual(yes[0].start, 18.4, delta=0.1)
+
+    def test_crosstalk_is_not_where_your_line_starts(self):
+        """A sensitive microphone hears the headphones: the video sits on the
+        microphone track too, quietly, while you say nothing."""
+        mic = track([(1.0, 10.0, 0.2), (12.0, 20.0, 0.2 * 10 ** (-16 / 20)),
+                     (21.5, 25.5, 0.2)], seconds=30.0, seed=15)
+        sys = track([(12.0, 20.0, 0.2)], seconds=30.0, seed=16)
+        report = diarize.merge(
+            [Segment(12.97, 26.09, "Did that work?", "mic")],
+            [Segment(12.0, 20.0, "The video.", "sys")],
+            mic_audio=mic, sys_audio=sys)
+        line = [line for line in report.lines if line.track == "mic"][0]
+        self.assertAlmostEqual(line.start, 21.4, delta=0.1)
+
+    def test_a_click_is_not_where_a_line_starts(self):
+        mic = track([(5.0, 5.05, 0.3), (8.0, 10.0, 0.2)], seed=17)
+        report = diarize.merge([Segment(4.0, 10.0, "After the click.", "mic")], [],
+                               mic_audio=mic, sys_audio=np.zeros_like(mic))
+        self.assertAlmostEqual(report.lines[0].start, 7.9, delta=0.1)
+
+    def test_a_line_made_up_over_a_pause_is_still_dropped(self):
+        """The silence check measures the whole window. Narrowed to the cough
+        in it, a line whisper invented over the pause would pass."""
+        mic = track([(1.0, 3.0, 0.2), (10.0, 10.3, 0.2 * 10 ** (-15 / 20))],
+                    seed=18)
+        report = diarize.merge(
+            [Segment(1.0, 3.0, "A real sentence.", "mic"),
+             Segment(5.0, 15.0, "Thank you for watching.", "mic")],
+            [], mic_audio=mic, sys_audio=np.zeros_like(mic))
+        self.assertEqual([line.text for line in report.lines], ["A real sentence."])
+        self.assertEqual(report.dropped_silence, 1)
+
+
 class TestOrderingAndRendering(unittest.TestCase):
     def test_chronological_order(self):
         mic = track([(1.0, 2.0, 0.2), (7.0, 8.0, 0.2)], seed=8)

@@ -248,5 +248,54 @@ class TestGain(unittest.TestCase):
         np.testing.assert_allclose(with_track, quiet_tail * factor, rtol=1e-5)
 
 
+class TestSpeechSpan(unittest.TestCase):
+    """Where the speech of a segment is - whisper's window can hold a long
+    silence before it."""
+
+    RATE = 16000
+
+    def _signal(self, *bursts, seconds=20.0, level=0.2):
+        signal = np.zeros(int(seconds * self.RATE), dtype=np.float32)
+        rng = np.random.default_rng(5)
+        for start, end in bursts:
+            i_start, i_end = int(start * self.RATE), int(end * self.RATE)
+            signal[i_start:i_end] = rng.normal(0, level, i_end - i_start)
+        return signal
+
+    def test_the_window_is_narrowed_to_the_speech(self):
+        signal = self._signal((12.0, 14.0))
+        start, end = dsp.speech_span(signal, 0.0, 16.0, 0.2, self.RATE)
+        self.assertAlmostEqual(start, 12.0 - dsp.SPEECH_MARGIN_S, delta=0.03)
+        self.assertAlmostEqual(end, 14.0 + dsp.SPEECH_MARGIN_S, delta=0.03)
+
+    def test_it_never_leaves_the_window(self):
+        signal = self._signal((2.0, 8.0))
+        self.assertEqual(dsp.speech_span(signal, 3.0, 5.0, 0.2, self.RATE),
+                         (3.0, 5.0))
+
+    def test_without_speech_the_window_stays(self):
+        signal = self._signal((12.0, 14.0))
+        self.assertEqual(dsp.speech_span(signal, 1.0, 9.0, 0.2, self.RATE), (1.0, 9.0))
+        self.assertEqual(dsp.speech_span(signal, 1.0, 9.0, 0.0, self.RATE), (1.0, 9.0))
+        self.assertEqual(dsp.speech_span(None, 1.0, 9.0, 0.2, self.RATE), (1.0, 9.0))
+
+    def test_the_gain_does_not_matter(self):
+        signal = self._signal((6.0, 7.0), (9.0, 11.0))
+        expected = dsp.speech_span(signal, 0.0, 15.0, 0.2, self.RATE)
+        for factor in (0.05, 4.0):
+            self.assertEqual(dsp.speech_span(signal * factor, 0.0, 15.0,
+                                             0.2 * factor, self.RATE), expected)
+
+    def test_what_the_other_track_explains_is_crosstalk(self):
+        theirs = self._signal((2.0, 8.0))
+        mine = self._signal((2.0, 8.0), level=0.2 * 10 ** (-15 / 20)) \
+            + self._signal((10.0, 12.0))
+        alone = dsp.speech_span(mine, 0.0, 13.0, 0.2, self.RATE)
+        self.assertLess(alone[0], 2.0)
+        start, _end = dsp.speech_span(mine, 0.0, 13.0, 0.2, self.RATE,
+                                      other=theirs, other_reference=0.2)
+        self.assertAlmostEqual(start, 10.0 - dsp.SPEECH_MARGIN_S, delta=0.03)
+
+
 if __name__ == "__main__":
     unittest.main()
