@@ -129,10 +129,10 @@ class TestFinalizer(unittest.TestCase):
         finished = self.bridge.first(Finished, events)
         self.assertIsNotNone(finished, "no Finished event was posted")
 
-        # Audible mixdown: stereo, 16 kHz
+        # Audible mixdown: both voices in the middle, at the recorded rate
         info = sf.info(finished.audio_path)
-        self.assertEqual(info.channels, 2)
-        self.assertEqual(info.samplerate, dsp.TARGET_RATE)
+        self.assertEqual(info.channels, 1)
+        self.assertEqual(info.samplerate, RATE)
         self.assertAlmostEqual(info.frames / info.samplerate, 10.0, places=1)
 
         with open(finished.txt_path, encoding="utf-8") as handle:

@@ -230,14 +230,14 @@ class Finalizer(_Worker):
         system = _pad_to(system, length)
 
         # --- 2. Audible mixdown (with the gain sliders) -----------------
+        # From the raw tracks at their full rate, not from the 16 kHz copies
+        # above - those are for recognition only.
         mix_path = os.path.join(out_dir, f"{base_name}.wav")
-        stereo = np.column_stack([
-            dsp.limit_peak(dsp.apply_gain(mic, settings.mic_gain_db)),
-            dsp.limit_peak(dsp.apply_gain(system, settings.loop_gain_db)),
-        ])
-        sf.write(mix_path, stereo, dsp.TARGET_RATE, subtype="PCM_16")
+        mix_rate, _frames = capture.write_mixdown(
+            recording, mix_path, settings.mic_gain_db, settings.loop_gain_db)
         bridge.post(Log(f"Recording saved: {os.path.basename(mix_path)} "
-                        f"({length / dsp.TARGET_RATE:.1f} s)\n"))
+                        f"({length / dsp.TARGET_RATE:.1f} s, "
+                        f"{mix_rate / 1000:g} kHz)\n"))
 
         # --- 3. Normalise the tracks for recognition --------------------
         # Independent normalisation is safe now: speaker attribution works on
@@ -824,9 +824,9 @@ class FileFinalizer(_Worker):
         if _same_file(file_path, mix_path):
             # The file picked for upload IS the output audio - a recording
             # chosen from the output folder. Converting it would replace it
-            # with a mono 16 kHz copy, which for the app's own recordings
-            # destroys the two channels (microphone left, system right) they
-            # consist of. It stays exactly as it is.
+            # with a 16 kHz copy, which for the app's own recordings throws
+            # away everything above 8 kHz they were saved with. It stays
+            # exactly as it is.
             bridge.post(Log(f"Audio file loaded: {os.path.basename(mix_path)} "
                             f"({duration_s:.1f} s) - left untouched\n"))
         else:
